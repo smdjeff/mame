@@ -70,33 +70,45 @@ void sega_speech_device::device_start()
 
 int sega_speech_device::t0_r()
 {
+	if (m_t0) {
+//    	printf("%s: t0_r=%d\n", machine().scheduler().time().as_string(), m_t0);
+    }
 	return m_t0;
 }
 
 int sega_speech_device::t1_r()
 {
-//printf("%s: t1_r=%d\n", machine().scheduler().time().as_string(), m_drq);
+	if (m_drq) {
+//    	printf("%s: t1_r=%d\n", machine().scheduler().time().as_string(), m_drq);
+    }
 	return m_drq;
 }
 
 uint8_t sega_speech_device::p1_r()
 {
-	return m_latch & 0x7f;
+	uint8_t data = m_latch & 0x7f;
+//	printf("p1_r:%02x\n",data);
+	return data;
 }
 
 uint8_t sega_speech_device::rom_r(offs_t offset)
 {
-	return m_speech->base()[0x100 * (m_p2 & 0x3f) + offset];
+	uint16_t addr = 0x100 * (m_p2 & 0x3f) + offset;
+	uint8_t data = m_speech->base()[addr];
+//	printf("rom_r:%04x %02x\n",addr,data);
+	return data;
 }
 
 void sega_speech_device::p1_w(uint8_t data)
 {
+//	printf("p1_w:%02x\n",data);
 	if (!(data & 0x80))
 		m_t0 = 0;
 }
 
 void sega_speech_device::p2_w(uint8_t data)
 {
+//	printf("p2_w:%02x\n",data);
 	m_p2 = data;
 }
 
@@ -110,7 +122,7 @@ void sega_speech_device::p2_w(uint8_t data)
 
 void sega_speech_device::drq_w(int state)
 {
-//printf("%s: DRQ=%d\n", machine().scheduler().time().as_string(), state);
+//    printf("%s: DRQ=%d\n", machine().scheduler().time().as_string(), state);
 	m_drq = (state == ASSERT_LINE);
 }
 

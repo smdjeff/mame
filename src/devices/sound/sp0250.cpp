@@ -162,14 +162,23 @@ void sp0250_device::load_values()
 		m_filter[f].reset();
 }
 
+static void dump(uint8_t *data, int len) {
+	// FILE *fptr = fopen("/Users/jeff/git/sega-vector/tools/dump.bin", "ab");
+   // fwrite(data, 1, len, fptr);
+   // fclose(fptr);
+	// printf("write:"); for (int i=0;i<len;i++) printf("%02x ",data[i]); printf("\n");
+}
+
 void sp0250_device::write(uint8_t data)
 {
 	m_stream->update();
 	if (m_fifo_pos != 15)
 	{
 		m_fifo[m_fifo_pos++] = data;
-		if (m_fifo_pos == 15)
+		if (m_fifo_pos == 15) {
+			dump(m_fifo,15);
 			m_drq(CLEAR_LINE);
+		}
 	}
 	else
 		logerror("%s: overflow SP0250 FIFO\n", machine().describe_context());

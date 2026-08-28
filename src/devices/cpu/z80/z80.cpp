@@ -103,6 +103,31 @@ u8 z80_device::data_read(u16 addr)
  ***************************************************************/
 void z80_device::data_write(u16 addr, u8 value)
 {
+	if ( addr == 0xF666 ) {
+      static u8 packet[5] = {0,};
+      packet[0] = packet[1];
+      packet[1] = packet[2];
+      packet[2] = packet[3];
+      packet[3] = packet[4];
+      packet[4] = value;
+      if ( packet[0] == 0xbe && packet[1] == 0xef ) {
+           char c = packet[2];
+            uint16_t v = (packet[3] << 8) + packet[4];
+            printf( "%s: debug(%c): %04x(%d)\n", machine().scheduler().time().as_string(), c, v, v );
+      }
+      return;
+	}
+	//make -j$(sysctl -n hw.ncpu) PTR64=1 SYMBOLS=1 FORCE_ASSERTS=1
+	// assert( SP > (0xC800+(1*1024)) );
+	// assert( !(addr == 0x0000) );
+	// assert( !(addr > 0xbfff && addr < 0xc800) );
+	// assert( !(addr > 0xefff) );
+
+	//if ( SP < (0xC800+(1*1024)) ) { printf("z80 stack overflow:%04x\n", SP); exit(1); }
+	if ( addr == 0x0000 ) { printf("z80 data_write to null\n");  exit(1); }
+	if ( addr > 0xbfff && addr < 0xc800 ) { printf("z80 data_write invalid 0xc000 memory block\n");  exit(1); }
+	if ( addr > 0xefff ) { printf("z80 data_write above 0xefff\n");  exit(1); }
+
 	m_data.write_interruptible(addr, value);
 }
 

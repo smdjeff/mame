@@ -23,6 +23,8 @@
 
 #include "screen.h"
 
+#include <vector>
+
 #define CPU_CLOCK           8000000     /* not used when video boards are connected */
 #define VIDEO_CLOCK         15468480
 
@@ -51,6 +53,52 @@ public:
 		m_spinner(*this, "SPINNER"),
 		m_mult_data{0,0},
 		m_mult_result(0),
+		m_vector_pc(0),
+		m_polar_windex(0),
+		m_polar_data{0,0,0,0},
+		m_polar_vector(0),
+		m_rotate_windex(0),
+		m_rotate_data{0,0,0,0},
+		m_rotate_vector(0),
+		m_cross_windex(0),
+		m_cross_data{0,0,0,0,0,0},
+		m_cross_result(0),
+		m_triple_windex(0),
+		m_triple_data{0,0,0,0,0,0,0,0,0,0,0,0},
+		m_triple_result(0),
+		m_pit_windex(0),
+		m_pit_data{0,0,0,0,0,0,0,0},
+		m_pit_result(0),
+		m_proj_load_windex(0),
+		m_proj_load_data{0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+		m_proj_verts_ptr(0),
+		m_proj_count(0),
+		m_proj_shift(0),
+		m_proj_px_ptr(0),
+		m_proj_py_ptr(0),
+		m_proj_px8_ptr(0),
+		m_proj_py8_ptr(0),
+		m_proj_pz8_ptr(0),
+		m_proj_windex(0),
+		m_proj_data{0,0,0,0},
+		m_hl_load_windex(0),
+		m_hl_load_data{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+		m_hl_px8_ptr(0),
+		m_hl_py8_ptr(0),
+		m_hl_pz8_ptr(0),
+		m_hl_px_ptr(0),
+		m_hl_py_ptr(0),
+		m_hl_faces_ptr(0),
+		m_hl_face_colors_ptr(0),
+		m_hl_edges_ptr(0),
+		m_hl_edge_count(0),
+		m_hl_edge_colors_ptr(0),
+		m_hl_part_face_end_ptr(0),
+		m_hl_part_count(0),
+		m_hl_dest_max(0),
+		m_hl_count_ptr(0),
+		m_hl_windex(0),
+		m_hl_data{0,0,0,0},
 		m_spinner_select(0),
 		m_spinner_sign(0),
 		m_spinner_count(0),
@@ -61,7 +109,33 @@ public:
 		m_decrypt(nullptr),
 		m_min_x(0),
 		m_min_y(0),
-		m_draw_end_time(attotime::zero)
+		m_vg_timer(nullptr),
+		m_vg_phase(0),
+		m_vg_symaddr(0),
+		m_vg_curx(0),
+		m_vg_cury(0),
+		m_vg_vecaddr(0),
+		m_vg_header_snap{0,0,0,0,0,0,0,0,0,0},
+		m_vg_vector_snap{0,0,0,0},
+		m_vg_draw(0),
+		m_vg_symangle(0),
+		m_vg_scale(0),
+		m_vg_attrib(0),
+		m_vg_length(0),
+		m_vg_vecangle(0),
+		m_vg_deltax(0),
+		m_vg_deltay(0),
+		m_vg_draw_remaining(0),
+		m_vg_xaccum(0),
+		m_vg_yaccum(0),
+		m_vg_clipped(false),
+		m_vg_color(0),
+		m_vg_intensity(0),
+		m_vg_symbol_is_last(false),
+		m_vg_idle(true),
+		m_vg_pass_start_time(attotime::zero),
+		m_vg_symbol_count(0),
+		m_vg_vector_count(0)
 	{ }
 
 	void g80v_base(machine_config &config);
@@ -128,6 +202,64 @@ private:
 
 	u8 m_mult_data[2];
 	u16 m_mult_result;
+	u16 m_vector_pc;
+
+// xy_rect_to_polar( int16_t dx, int16_t dy, uint8_t* size, uint16_t* angle )
+	u8 m_polar_windex;
+	u8 m_polar_data[4];
+	u32 m_polar_vector;
+
+	u8 m_rotate_windex;
+	u8 m_rotate_data[4];
+	u16 m_rotate_vector;
+
+	u8 m_cross_windex;
+	u8 m_cross_data[6];
+	u8 m_cross_result;
+
+	u8 m_triple_windex;
+	u8 m_triple_data[12];
+	u8 m_triple_result;
+
+	u8 m_pit_windex;
+	u8 m_pit_data[8];
+	u8 m_pit_result;
+
+	// CORDIC_PROJECT_POINT split into a LOAD burst (fired once per shape
+	// switch, m_proj_load_*, persisted as plain members between calls) and a
+	// RUN burst (fired every frame, m_proj_windex/m_proj_data, just
+	// yaw/pitch) -- see cordic_project_args_t's comment, sega-vector/3d's
+	// game.c, for why. cordic_project_point_load_w latches the LOAD fields
+	// below; cordic_project_point_w (the RUN handler) reads them back
+	// alongside the freshly-received yaw/pitch.
+	u8  m_proj_load_windex;
+	u8  m_proj_load_data[14];
+	u16 m_proj_verts_ptr;
+	u8  m_proj_count;
+	u8  m_proj_shift;
+	u16 m_proj_px_ptr, m_proj_py_ptr, m_proj_px8_ptr, m_proj_py8_ptr, m_proj_pz8_ptr;
+	u8 m_proj_windex;
+	u8 m_proj_data[4];
+
+	// same LOAD/RUN split as CORDIC_PROJECT_POINT above, see
+	// cordic_hidden_line_args_t's comment (game.c) -- only face_vis_ptr/
+	// dest_ptr are sent every call, everything else is loaded once per shape.
+	u8  m_hl_load_windex;
+	u8  m_hl_load_data[26];
+	u16 m_hl_px8_ptr, m_hl_py8_ptr, m_hl_pz8_ptr;
+	u16 m_hl_px_ptr, m_hl_py_ptr;
+	u16 m_hl_faces_ptr;
+	u16 m_hl_face_colors_ptr;
+	u16 m_hl_edges_ptr;
+	u8  m_hl_edge_count;
+	u16 m_hl_edge_colors_ptr;
+	u16 m_hl_part_face_end_ptr;
+	u8  m_hl_part_count;
+	u16 m_hl_dest_max;
+	u16 m_hl_count_ptr;
+	u8 m_hl_windex;
+	u8 m_hl_data[4];
+
 	u8 m_spinner_select;
 	u8 m_spinner_sign;
 	u8 m_spinner_count;
@@ -138,7 +270,71 @@ private:
 	segag80_decrypt_func m_decrypt;
 	int m_min_x;
 	int m_min_y;
-	attotime m_draw_end_time;
+
+	// vector generator state machine (segag80v_v.cpp) -- runs as its own free-running,
+	// VCL-clocked device via m_vg_timer, genuinely interleaved with Z80 execution through
+	// MAME's scheduler, instead of being computed as one synchronous batch per video frame.
+	// m_vector_pc is updated live at each symbol/vector address latch, exactly like the
+	// real U10/U11/U12 counter chain, so XY_PC_H/L reads always see the true current value.
+	//
+	// Per the G80 hardware reference: "The vector PC is reset 40 times/second... there is
+	// no way to stop [it]... Display list state machine stops when Last Symbol detected."
+	// So the reset is NOT this state machine deciding it's done and looping back -- it's
+	// vblank_callback() (segag80v.cpp), driven by the real screen's absolute 40Hz refresh
+	// (the same EDGINT signal/divider chain as the CPU's own 40Hz interrupt -- see
+	// update_int()'s comment), unconditionally restarting the walk from symbol 0 every
+	// tick, cutting off whatever wasn't finished. If the list finishes early, this instead
+	// goes idle and does nothing until that same vblank callback wakes it back up.
+	emu_timer *m_vg_timer;
+	u8  m_vg_phase;             // current U51 phase: 0-9 header, 10-14 vector fetch, 15 per-pixel draw
+	u16 m_vg_symaddr;           // walk position in the symbol table
+	u16 m_vg_curx, m_vg_cury;   // beam position, persists across vectors within a symbol
+	u16 m_vg_vecaddr;           // walk position in the current symbol's vector list
+
+	// MAME models the Z80 and the vector generator sharing plain m_vectorram with no bus
+	// arbitration between them (real hardware has one). Since phases 0-9 and 10-13 are now
+	// individually time-spaced (~U51_ATTOS apart) instead of one atomic burst, a CPU write
+	// landing between two of those phases would tear a multi-byte field like vecaddr or
+	// vecangle -- one phase reading the old byte, the next reading one the CPU already
+	// overwrote. Each group instead does its underlying vectorram read as one atomic burst
+	// at the group's first phase, into these snapshots; later phases in the same group just
+	// unpack already-fetched bytes rather than re-reading memory, so m_vector_pc still only
+	// becomes visible at its correct phase (6, 13) with no tear window in between.
+	u8  m_vg_header_snap[10];
+	u8  m_vg_vector_snap[4];
+
+	u8  m_vg_draw;              // symbol header's draw byte (phase 0), used at phase 9
+	u16 m_vg_symangle;
+	u8  m_vg_scale;
+	u8  m_vg_attrib;            // vector's attribute byte (phase 10), used through phase 15
+	u16 m_vg_length;
+	u16 m_vg_vecangle;
+	u16 m_vg_deltax, m_vg_deltay;
+	u16 m_vg_draw_remaining;    // phase 15: length units still to draw, one VCL tick each
+	u16 m_vg_xaccum, m_vg_yaccum;
+	bool m_vg_clipped;
+	u32 m_vg_color;
+	u8  m_vg_intensity;
+	bool m_vg_symbol_is_last;   // current symbol's draw byte had bit 7 set (stop after its vectors)
+	bool m_vg_idle;             // true once Last Symbol is reached; waits for the next vblank
+	attotime m_vg_pass_start_time; // diagnostic only (see vg_start_pass()'s printf) -- not used
+	                                // for any timing/reset decision, unlike its old role
+	u32 m_vg_symbol_count, m_vg_vector_count; // diagnostic only -- content walked this pass
+
+	// vg_clock() draws into this shadow buffer instead of m_vector directly, since it now
+	// runs on its own timer independent of screen_update_segag80v()'s own 40Hz one -- without
+	// this, screen_update() could catch m_vector's list mid-pass (partial image) or right
+	// after a clear_list() (blank flash). vg_start_pass() flushes the just-completed pass's
+	// points into m_vector in one shot before starting the next, so screen_update() -- firing
+	// whenever it likes -- only ever sees a complete, self-consistent prior pass.
+	struct vg_point { int x, y; u32 color; u8 intensity; };
+	std::vector<vg_point> m_vg_pending;
+	void vg_add_point(int x, int y, u32 color, u8 intensity);
+
+	void vg_start_pass();
+	void vg_finish_vector(int adjx, int adjy);
+	void vg_go_idle();
+	TIMER_CALLBACK_MEMBER(vg_clock);
 
 	u8 opcode_r(offs_t offset);
 	u8 mainrom_r(offs_t offset);
@@ -150,6 +346,30 @@ private:
 	u8 elim4_input_r();
 	void multiply_w(offs_t offset, u8 data);
 	u8 multiply_r();
+	u8 vector_pc_lsb_r();
+	u8 vector_pc_msb_r();
+
+	void rect_to_polar_w(u8 data);
+	u8 rect_to_polar_r();
+
+	void cordic_rotate_w(u8 data);
+	u8 cordic_rotate_r();
+
+	void cordic_cross_sign_w(u8 data);
+	u8 cordic_cross_sign_r();
+
+	void cordic_triple_sign_w(u8 data);
+	u8 cordic_triple_sign_r();
+
+	void cordic_point_in_tri_w(u8 data);
+	u8 cordic_point_in_tri_r();
+
+	void cordic_project_point_load_w(u8 data);
+	void cordic_project_point_w(u8 data);
+
+	void cordic_hidden_line_load_w(u8 data);
+	void cordic_hidden_line_w(u8 data);
+
 	void coin_count_w(u8 data);
 	void unknown_w(u8 data);
 	void update_int();
@@ -161,7 +381,6 @@ private:
 	virtual void video_start() override ATTR_COLD;
 	uint32_t screen_update_segag80v(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect);
 	inline bool adjust_xy(int rawx, int rawy, int &outx, int &outy);
-	void sega_generate_vector_list();
 	offs_t decrypt_offset(offs_t offset);
 	inline u8 demangle(u8 d7d6, u8 d5d4, u8 d3d2, u8 d1d0);
 
