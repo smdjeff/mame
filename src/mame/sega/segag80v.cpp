@@ -169,7 +169,43 @@ static constexpr int WAIT_STATES = 2;
 // the same signal under its schematic's rounded label. Since the Z80 runs at
 // exactly VCL_CLOCK/2 (VIDEO_CLOCK/4 vs. VECTOR_CLOCK/2), that ratio makes the
 // conversion exact, not approximate: 16 VCL_CLOCK edges = 8 Z80 T-states.
-static constexpr int MULTIPLY_WAIT_STATES = 8;
+static constexpr int MULTIPLY_WAIT_STATES = 1;
+
+
+// z80gpu FPGA-replacement timing model (see init_waitstates_fpga()). The
+// FPGA drives T80se (a Z80-compatible soft core) at a fixed 50MHz internal
+// clock instead of this board's real ~3.867MHz (VIDEO_CLOCK/4), and adds
+// digitally-generated WAIT states on real MREQ_n/IORQ_n accesses to bring
+// just those cycles back down to roughly the original board's timing --
+// while purely-internal T-states (no bus access at all, e.g. the 2 extra
+// T-states in INC HL) get no added wait and run at the full 50MHz rate.
+// These four values are exactly what z80gpu's own cosimulation testbench
+// (sim/bus_wait_gen_tb.v in that repo) measured against the real T80se core
+// at its chosen default of 46 added wait states on each of ROM/RAM/IO:
+//   M1 fetch (opcode + refresh, one M1_cycles cost):        1000ns -> 50 cycles @ 20ns
+//   plain memory read/write (one memrq_cycles cost):         980ns -> 49 cycles @ 20ns
+//   I/O in/out (one iorq_cycles cost):                      1000ns -> 50 cycles @ 20ns
+// at FPGA_CPU_CLOCK's 20ns/cycle. z80_set_m1_cycles()/set_memrq_cycles()/
+// set_iorq_cycles() (z80.h) are the exact per-access-category cost overrides
+// the core already exposes for this -- internal-only cycles (nomreq_ir,
+// bare "+N" steps in z80.lst) are structurally untouched by any of the
+// three, which is what reproduces the FPGA's asymmetric speedup here
+// without needing any change to the Z80 core itself.
+
+static constexpr u32 FPGA_CPU_CLOCK    = 100'000'000;
+static constexpr u8  FPGA_M1_CYCLES    = 100;
+static constexpr u8  FPGA_MEMRQ_CYCLES = 99;
+static constexpr u8  FPGA_IORQ_CYCLES  = 100;
+
+// Factory-equivalent values used earlier for a parity sanity check against
+// plain init_startrek()/startrek() -- confirmed matching (identical vector
+// pass timestamps/counts) once init_startrek_fpga() also called
+// init_waitstates() and the m_decrypt security-scheme mismatch was fixed.
+// Kept here for reference if that check ever needs to be repeated:
+//   static constexpr u32 FPGA_CPU_CLOCK    = 3'867'120;
+//   static constexpr u8  FPGA_M1_CYCLES    = 4;   // == real WAIT_STATES-less stock default
+//   static constexpr u8  FPGA_MEMRQ_CYCLES = 3;   // (real factory-equivalent is 6/5/4 --
+//   static constexpr u8  FPGA_IORQ_CYCLES  = 4;   //  see init_waitstates()'s own WAIT_STATES)
 
 
 /*************************************
@@ -208,6 +244,17 @@ void segag80v_state::machine_start()
 	save_item(NAME(m_coin_ff_state));
 	save_item(NAME(m_coin_last_state));
 	save_item(NAME(m_edgint_ff_state));
+
+	save_item(NAME(m_accel_shape_mem));
+	save_item(NAME(m_accel_scratch_mem));
+	save_item(NAME(m_accel_ctrl));
+	save_item(NAME(m_accel_shape_select));
+	save_item(NAME(m_accel_yaw));
+	save_item(NAME(m_accel_pitch));
+	save_item(NAME(m_accel_vec_count));
+	save_item(NAME(m_accel_vec_data_idx));
+	save_item(NAME(m_accel_load_addr));
+	save_item(NAME(m_accel_busy_until));
 
 	save_item(NAME(m_vg_phase));
 	save_item(NAME(m_vg_symaddr));
@@ -442,8 +489,12 @@ void segag80v_state::multiply_w(offs_t offset, u8 data)
 		// datasheet's stated m+n clock-cycle cost is about how long the serial
 		// shift-multiply takes, not which of the chip's two modes is wired up
 		// here, so this stall estimate is unaffected by the signed/unsigned
-		// correction above.)
-		if (!machine().side_effects_disabled())
+		// correction above.) Skipped under the FPGA timing model: z80gpu's
+		// xy_mult8x8.v deliberately doesn't reproduce this stall, computing
+		// the product combinationally/instantly instead (see that file's own
+		// header comment) -- so modeling it here would stall a cycle count
+		// the real FPGA hardware never actually spends.
+		if (!machine().side_effects_disabled() && !m_fpga_timing)
 			m_maincpu->adjust_icount(-MULTIPLY_WAIT_STATES);
 	}
 }
@@ -475,612 +526,174 @@ u8 segag80v_state::vector_pc_msb_r()
 	return (m_vector_pc >> 8) & 0x0f;
 }
 
-// magnitude (clamped to the 8-bit output register) and angle (10-bit fraction
-// of a turn, 0 = +y axis, 256 = +x axis) of (dx,dy)
-static void polarToVector( int16_t dx, int16_t dy, u8 *magnitude, u16 *direction )
-{
-	double mag = std::hypot( (double)dx, (double)dy );
-	*magnitude = (u8)std::min( 255.0, std::round( mag ) );
+// The idealized CORDIC coprocessor (ports 0xC0-0xC8, rect_to_polar_w through
+// cordic_hidden_line_w) now lives in segag80v_cordic.h -- see that file's
+// own header comment.
+#include "segag80v_cordic.h"
 
-	if ( dx == 0 && dy == 0 ) {
-		*direction = 0;
+
+/*************************************
+ *
+ *  z80gpu 3D accelerator model (bit-exact, not idealized -- see
+ *  segag80v_z80gpu_accel.h and m_accel_* members' own comments)
+ *
+ *************************************/
+
+namespace {
+constexpr u16 ACCEL_SCR_PX_BASE       = 0;
+constexpr u16 ACCEL_SCR_PY_BASE       = 220;
+constexpr u16 ACCEL_SCR_PX8_BASE      = 440;
+constexpr u16 ACCEL_SCR_PY8_BASE      = 550;
+constexpr u16 ACCEL_SCR_PZ8_BASE      = 660;
+constexpr u16 ACCEL_SCR_FACE_VIS_BASE = 770;
+constexpr u16 ACCEL_SCR_VECBUF_BASE   = 782; // matches accel_top.v's SCR_VECBUF_BASE exactly
+}
+
+// Runs STAGE1_ROTATE then STAGE2_CULL synchronously, writing results into
+// m_accel_scratch_mem at exactly accel_scratch_mem.v's fixed offsets.
+// Called from z80gpu_ctrl_w on START -- see that function's own comment
+// for why the results land in memory immediately but DONE isn't visible
+// to a polling Z80 until an estimated real-hardware delay has elapsed.
+void segag80v_state::z80gpu_run_frame()
+{
+	if (m_accel_shape_select >= z80gpu_accel::SHAPE_COUNT)
+		return;
+	const z80gpu_accel::ShapeInfo &shape = z80gpu_accel::kShapes[m_accel_shape_select];
+
+	// STAGE1_ROTATE
+	for (unsigned i = 0; i < shape.vertex_count; i++) {
+		u16 va = shape.verts_off + i * 6;
+		int16_t vx = (int16_t)(m_accel_shape_mem[va + 0] | (m_accel_shape_mem[va + 1] << 8));
+		int16_t vy = (int16_t)(m_accel_shape_mem[va + 2] | (m_accel_shape_mem[va + 3] << 8));
+		int16_t vz = (int16_t)(m_accel_shape_mem[va + 4] | (m_accel_shape_mem[va + 5] << 8));
+
+		z80gpu_accel::RotatedVertex rv = z80gpu_accel::rotate_project(vx, vy, vz, m_accel_yaw, m_accel_pitch, shape.coord_shift);
+
+		m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 0] = (u8)rv.px;
+		m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 1] = (u8)((u16)rv.px >> 8);
+		m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 0] = (u8)rv.py;
+		m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 1] = (u8)((u16)rv.py >> 8);
+		m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + i] = (u8)rv.px8;
+		m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + i] = (u8)rv.py8;
+		m_accel_scratch_mem[ACCEL_SCR_PZ8_BASE + i] = (u8)rv.pz8;
+	}
+
+	// STAGE2_CULL
+	for (unsigned f = 0; f < shape.face_count; f++) {
+		u16 fa = shape.faces_off + f * 4;
+		u8 v0 = m_accel_shape_mem[fa + 0], v1 = m_accel_shape_mem[fa + 1], v2 = m_accel_shape_mem[fa + 2];
+		int8_t ax = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v0], ay = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v0];
+		int8_t bx = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v1], by = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v1];
+		int8_t cx = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v2], cy = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v2];
+
+		u16 byte_off = ACCEL_SCR_FACE_VIS_BASE + (f >> 3);
+		if ((f & 7) == 0)
+			m_accel_scratch_mem[byte_off] = 0; // fresh group -- see accel_cull.v's own comment on why no separate clear pass is needed
+		if (z80gpu_accel::cross_negative(ax, ay, bx, by, cx, cy))
+			m_accel_scratch_mem[byte_off] |= (1 << (f & 7));
+	}
+
+	// STAGE3_VECBUILD (accel_vecbuild.v's steel-thread output stage --
+	// backface-cull-only, no per-part hidden-line removal yet, see that
+	// module's own header). m_accel_scratch_mem was grown from 2048 to
+	// 4096 bytes specifically so every shape's true worst case (edge_count*3
+	// records -- enterprise's is the largest, 212*3=636 records/2544 bytes)
+	// fits with margin; this guard should never actually fire against any
+	// of the three current shapes anymore, but stays as a real safety net
+	// -- an unguarded C++ write past m_accel_scratch_mem's bounds would be
+	// undefined behavior (unlike the RTL, a 12-bit address register that
+	// just wraps on overflow -- wrong output, not memory corruption), so
+	// this refuses rather than risk it. Re-check the arithmetic here (and
+	// accel_scratch_mem.v's own sizing) before adding a shape with more
+	// edges than enterprise.
+	constexpr u32 ACCEL_SCR_VECBUF_MAX_BYTES = sizeof(m_accel_scratch_mem) - ACCEL_SCR_VECBUF_BASE;
+	if ((u32)shape.edge_count * 3 * 4 > ACCEL_SCR_VECBUF_MAX_BYTES) {
+		m_accel_vec_count = 0;
 		return;
 	}
 
-	double turns = std::atan2( (double)dx, (double)dy ) / (2.0 * M_PI);
-	*direction = (u16)std::lround( turns * 1024.0 ) & 0x03FF;
-}
-
-void segag80v_state::rect_to_polar_w(u8 data)
-{
-	m_polar_data[m_polar_windex] = data;
-	m_polar_windex = (m_polar_windex + 1) & 3;
-	if ( m_polar_windex != 0 )
-		return;
-
-	int16_t dx = m_polar_data[0] | (m_polar_data[1] << 8);
-	int16_t dy = m_polar_data[2] | (m_polar_data[3] << 8);
-
-	u8 magnitude;
-	u16 direction;
-	polarToVector( dx, dy, &magnitude, &direction );
-
-	m_polar_vector = magnitude | (direction << 8);
-}
-
-u8 segag80v_state::rect_to_polar_r()
-{
-	u8 result = m_polar_vector;
-	m_polar_vector >>= 8;
-	return result;
-}
-
-// rotates (a,b) by angle (same 10-bit turn units as polarToVector's *direction);
-// wraps like the real 8-bit output register rather than saturating
-static void cordicRotate( int8_t a, int8_t b, u16 angle, int8_t *ar, int8_t *br )
-{
-	double theta = (angle & 0x03FF) * (2.0 * M_PI / 1024.0);
-	double s = std::sin( theta );
-	double c = std::cos( theta );
-
-	*ar = (int8_t)(u8)std::lround( a * c + b * s );
-	*br = (int8_t)(u8)std::lround( b * c - a * s );
-}
-
-void segag80v_state::cordic_rotate_w(u8 data)
-{
-	m_rotate_data[m_rotate_windex] = data;
-	m_rotate_windex = (m_rotate_windex + 1) & 3;
-	if ( m_rotate_windex != 0 )
-		return;
-
-	int8_t a = (int8_t)m_rotate_data[0];
-	int8_t b = (int8_t)m_rotate_data[1];
-	u16 angle = m_rotate_data[2] | (m_rotate_data[3] << 8);
-
-	int8_t ar, br;
-	cordicRotate( a, b, angle, &ar, &br );
-
-	m_rotate_vector = (u8)ar | ((u8)br << 8);
-}
-
-u8 segag80v_state::cordic_rotate_r()
-{
-	u8 result = m_rotate_vector;
-	m_rotate_vector >>= 8;
-	return result;
-}
-
-// sign of the 2D cross product (b-a)x(c-a) for a triangle a,b,c (or any
-// three winding points); only one byte comes back since callers only ever
-// test the sign, never the magnitude. Takes the three raw points rather
-// than two pre-subtracted edge vectors (an earlier version of this
-// register did) for the same reason cordic_triple_sign_w and
-// cordic_point_in_tri_w do: a coordinate delta between two corners of a
-// wide face can exceed +-127, and subtracting in the Z80 caller's int8_t
-// before the hardware ever sees it just wraps silently -- for this
-// register specifically, that showed up as backface culling flipping a
-// wide face's own front/back sign, which then made it unusable as an
-// occluder for anything behind it (the face wasn't being drawn wrong, it
-// was being *excluded from the occluder search* wrong).
-void segag80v_state::cordic_cross_sign_w(u8 data)
-{
-	m_cross_data[m_cross_windex] = data;
-	m_cross_windex = (m_cross_windex + 1) % 6;
-	if ( m_cross_windex != 0 )
-		return;
-
-	int8_t ax = (int8_t)m_cross_data[0], ay = (int8_t)m_cross_data[1];
-	int8_t bx = (int8_t)m_cross_data[2], by = (int8_t)m_cross_data[3];
-	int8_t cx = (int8_t)m_cross_data[4], cy = (int8_t)m_cross_data[5];
-
-	int32_t dx1 = (int32_t)bx - ax, dy1 = (int32_t)by - ay;
-	int32_t dx2 = (int32_t)cx - ax, dy2 = (int32_t)cy - ay;
-
-	int64_t cross = (int64_t)dx1 * dy2 - (int64_t)dy1 * dx2;
-	m_cross_result = (cross < 0) ? 1 : 0;
-}
-
-u8 segag80v_state::cordic_cross_sign_r()
-{
-	return m_cross_result;
-}
-
-// sign of the scalar triple product (b-a)x(c-a) . (q-a), for a triangle
-// a,b,c and a query point q -- tells which side of the triangle's plane q
-// is on, using the same winding/sign convention as cordic_cross_sign
-// (whose 2D cross is exactly this triple product's z-only special case).
-// Takes the four raw points rather than three pre-subtracted edge
-// vectors (an earlier version of this register did) so the a/b/c/q-a
-// subtractions happen here, in int32_t, rather than in the Z80 caller's
-// int8_t: a coordinate delta between two corners of a wide face (e.g. a
-// box part's own diagonal) can easily exceed +-127 and wrap silently if
-// computed by the caller and passed in already-subtracted, which read as
-// spurious un-occluded edges specifically on the widest parts of a shape.
-// Same principle as cordic_point_in_tri_w below: let the reference model
-// carry full precision throughout, the way a real bit-serial MAC datapath
-// (cf. the Star Wars mathbox) never truncates mid-pipeline either.
-void segag80v_state::cordic_triple_sign_w(u8 data)
-{
-	m_triple_data[m_triple_windex] = data;
-	m_triple_windex = (m_triple_windex + 1) % 12;
-	if (m_triple_windex != 0)
-		return;
-
-	int8_t ax = (int8_t)m_triple_data[0],  ay = (int8_t)m_triple_data[1],  az = (int8_t)m_triple_data[2];
-	int8_t bx = (int8_t)m_triple_data[3],  by = (int8_t)m_triple_data[4],  bz = (int8_t)m_triple_data[5];
-	int8_t cx = (int8_t)m_triple_data[6],  cy = (int8_t)m_triple_data[7],  cz = (int8_t)m_triple_data[8];
-	int8_t qx = (int8_t)m_triple_data[9],  qy = (int8_t)m_triple_data[10], qz = (int8_t)m_triple_data[11];
-
-	int32_t ux = (int32_t)bx - ax, uy = (int32_t)by - ay, uz = (int32_t)bz - az;
-	int32_t vx = (int32_t)cx - ax, vy = (int32_t)cy - ay, vz = (int32_t)cz - az;
-	int32_t dx = (int32_t)qx - ax, dy = (int32_t)qy - ay, dz = (int32_t)qz - az;
-
-	int64_t nx = (int64_t)uy * vz - (int64_t)uz * vy;
-	int64_t ny = (int64_t)uz * vx - (int64_t)ux * vz;
-	int64_t nz = (int64_t)ux * vy - (int64_t)uy * vx;
-	int64_t dot = nx * dx + ny * dy + nz * dz;
-
-	m_triple_result = (dot < 0) ? 1 : 0;
-}
-
-u8 segag80v_state::cordic_triple_sign_r()
-{
-	return m_triple_result;
-}
-
-// true if point (qx,qy) is inside triangle (ax,ay)-(bx,by)-(cx,cy), using
-// the same "all three edge cross-tests share the triangle's own winding
-// sign" rule the Z80 software version (pointInTriangle, game.c) computes
-// via three separate cordic_cross_sign_r() round trips -- collapsed to one
-// hardware call here, and (as with cordic_triple_sign_w above) done at
-// full precision rather than pre-shifted int8_t deltas.
-void segag80v_state::cordic_point_in_tri_w(u8 data)
-{
-	m_pit_data[m_pit_windex] = data;
-	m_pit_windex = (m_pit_windex + 1) % 8;
-	if (m_pit_windex != 0)
-		return;
-
-	int8_t ax = (int8_t)m_pit_data[0], ay = (int8_t)m_pit_data[1];
-	int8_t bx = (int8_t)m_pit_data[2], by = (int8_t)m_pit_data[3];
-	int8_t cx = (int8_t)m_pit_data[4], cy = (int8_t)m_pit_data[5];
-	int8_t qx = (int8_t)m_pit_data[6], qy = (int8_t)m_pit_data[7];
-
-	auto cross_neg = [](int16_t dx1, int16_t dy1, int16_t dx2, int16_t dy2) {
-		return ((int32_t)dx1 * dy2 - (int32_t)dy1 * dx2) < 0;
-	};
-
-	bool inside = cross_neg(bx - ax, by - ay, qx - ax, qy - ay)
-	           && cross_neg(cx - bx, cy - by, qx - bx, qy - by)
-	           && cross_neg(ax - cx, ay - cy, qx - cx, qy - cy);
-
-	m_pit_result = inside ? 1 : 0;
-}
-
-u8 segag80v_state::cordic_point_in_tri_r()
-{
-	return m_pit_result;
-}
-
-
-// LOAD half of CORDIC_PROJECT_POINT's wire protocol (port 0xc7) -- see
-// cordic_project_args_t's comment (sega-vector/3d's game.c) for the
-// load/run split. Fired once per shape switch; just latches the fields that
-// don't change between calls (verts_ptr/count/shift/output pointers) into
-// persistent members, no computation happens here.
-//
-// wire format (14 bytes): verts_ptr(u16), count(u8), shift(u8), px_ptr(u16),
-// py_ptr(u16), px8_ptr(u16), py8_ptr(u16), pz8_ptr(u16)
-void segag80v_state::cordic_project_point_load_w(u8 data)
-{
-	m_proj_load_data[m_proj_load_windex] = data;
-	m_proj_load_windex = (m_proj_load_windex + 1) % 14;
-	if (m_proj_load_windex != 0)
-		return;
-
-	auto rd16 = [this](int off) -> u16 { return m_proj_load_data[off] | (m_proj_load_data[off + 1] << 8); };
-
-	m_proj_verts_ptr = rd16(0);
-	m_proj_count     = m_proj_load_data[2];
-	m_proj_shift     = m_proj_load_data[3];
-	m_proj_px_ptr    = rd16(4);
-	m_proj_py_ptr    = rd16(6);
-	m_proj_px8_ptr   = rd16(8);
-	m_proj_py8_ptr   = rd16(10);
-	m_proj_pz8_ptr   = rd16(12);
-}
-
-
-// The CORDIC projection handler accesses Z80 memory through MAME's normal
-// program-space read/write dispatch (m_maincpu->space(AS_PROGRAM)), making it
-// functionally equivalent to a bus-mastering coprocessor performing DMA-style
-// memory transfers outside the Z80 instruction stream. The handler is invoked
-// when the final OUT of the RUN command sequence is written (see
-// cordic_project_point_load_w above for the LOAD half, fired once per shape
-// switch rather than every call). Although the emulated Z80 runs at 3.867 MHz
-// (VIDEO_CLOCK/4), the entire C++ routine executes synchronously on the host
-// and consumes no additional emulated T-states beyond the triggering OUT
-// instruction. Consequently, all vertex processing appears instantaneous
-// from the emulated system's perspective. Real hardware would require
-// BUSRQ/BUSAK arbitration and incur per-byte bus transfer latency; this
-// implementation intentionally models an idealized, zero-overhead
-// coprocessor rather than cycle-accurate bus contention.
-//
-// wire format (4 bytes): yaw(u16), pitch(u16)
-void segag80v_state::cordic_project_point_w(u8 data)
-{
-	m_proj_data[m_proj_windex] = data;
-	m_proj_windex = (m_proj_windex + 1) % 4;
-	if (m_proj_windex != 0)
-		return;
-
-	auto rd16 = [this](int off) -> u16 { return m_proj_data[off] | (m_proj_data[off + 1] << 8); };
-
-	u16 verts_ptr = m_proj_verts_ptr;
-	u8  count     = m_proj_count;
-	u16 yaw       = rd16(0);
-	u16 pitch     = rd16(2);
-	u8  shift     = m_proj_shift;
-	u16 px_ptr    = m_proj_px_ptr;
-	u16 py_ptr    = m_proj_py_ptr;
-	u16 px8_ptr   = m_proj_px8_ptr;
-	u16 py8_ptr   = m_proj_py8_ptr;
-	u16 pz8_ptr   = m_proj_pz8_ptr;
-
-	address_space &prog = m_maincpu->space(AS_PROGRAM);
-
-	double yawRad = (yaw & 0x03FF) * (2.0 * M_PI / 1024.0);
-	double cy = std::cos(yawRad), sy = std::sin(yawRad);
-	double pitchRad = (pitch & 0x03FF) * (2.0 * M_PI / 1024.0);
-	double cp = std::cos(pitchRad), sp = std::sin(pitchRad);
-	double scale = 1.0 / (double)(1 << shift);
-
-	printf("%s: start pc:%04X:cordic_project_point_w %d\n", machine().scheduler().time().as_string(), m_maincpu->pc(), count);
-
-	for (u8 i = 0; i < count; i++)
-	{
-		u16 va = verts_ptr + i * 6;
-		int16_t x = (int16_t)(prog.read_byte(va + 0) | (prog.read_byte(va + 1) << 8));
-		int16_t y = (int16_t)(prog.read_byte(va + 2) | (prog.read_byte(va + 3) << 8));
-		int16_t z = (int16_t)(prog.read_byte(va + 4) | (prog.read_byte(va + 5) << 8));
-
-		// rotate about Y (yaw): (x,z) -> (x1,z1)
-		double x1 = (double)x * cy + (double)z * sy;
-		double z1 = (double)z * cy - (double)x * sy;
-
-		// rotate about X (pitch): (z1,y) -> (z2,y1) -- z1 stays a double
-		// the whole way through, never quantized between the two rotations
-		double z2 = z1 * cp + (double)y * sp;
-		double y1 = (double)y * cp - z1 * sp;
-
-		int16_t px = (int16_t)(int32_t)std::lround(x1);
-		int16_t py = (int16_t)(int32_t)std::lround(y1);
-		int8_t px8 = (int8_t)(int32_t)std::lround(x1 * scale);
-		int8_t py8 = (int8_t)(int32_t)std::lround(y1 * scale);
-		int8_t pz8 = (int8_t)(int32_t)std::lround(z2 * scale);
-
-		prog.write_byte(px_ptr + i * 2 + 0, (u8)px);
-		prog.write_byte(px_ptr + i * 2 + 1, (u8)((u16)px >> 8));
-		prog.write_byte(py_ptr + i * 2 + 0, (u8)py);
-		prog.write_byte(py_ptr + i * 2 + 1, (u8)((u16)py >> 8));
-		prog.write_byte(px8_ptr + i, (u8)px8);
-		prog.write_byte(py8_ptr + i, (u8)py8);
-		prog.write_byte(pz8_ptr + i, (u8)pz8);
+	// Rebuild px/py as contiguous int16_t arrays for build_vecbuf:
+	// m_accel_scratch_mem stores them as separate LE byte pairs
+	// (STAGE1_ROTATE above), not a portable int16_t[] to reinterpret
+	// directly.
+	int16_t vpx[128], vpy[128];
+	for (unsigned i = 0; i < shape.vertex_count; i++) {
+		vpx[i] = (int16_t)(m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 0] | (m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 1] << 8));
+		vpy[i] = (int16_t)(m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 0] | (m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 1] << 8));
 	}
-
-	printf("%s: complete pc:%04X:cordic_project_point_w %d\n", machine().scheduler().time().as_string(), m_maincpu->pc(), count);
-
+	m_accel_vec_count = z80gpu_accel::build_vecbuf(
+		m_accel_shape_mem, &m_accel_scratch_mem[ACCEL_SCR_FACE_VIS_BASE],
+		vpx, vpy,
+		shape.edges_off, shape.face_colors_off, shape.edge_colors_off,
+		shape.edge_count, &m_accel_scratch_mem[ACCEL_SCR_VECBUF_BASE]);
 }
 
-
-// Roberts' Algorithm (Roberts, 1963): the shape is decomposed into convex
-// parts (part_face_end/part_count), and every edge that survives backface
-// culling gets clipped against every *other* part's front-facing faces --
-// real segment-vs-convex-polygon clipping (Liang-Barsky style: each
-// occluder's polygon edges and depth-plane are linear constraints on the
-// segment's parameter t), not a per-endpoint containment test, so an edge
-// can legitimately split into multiple visible pieces if it passes behind
-// more than one occluder. Writes the finished vector_t chain (color, size,
-// angle, pen-up moves, SEGA_LAST) directly into the destination buffer.
-//
-// Considered Appel's Algorithm (Appel, 1967) instead, which propagates
-// visibility incrementally along mesh connectivity rather than reclipping
-// every edge against every candidate occluder -- cheaper at runtime when it
-// applies. Rejected: its incremental propagation only works within one
-// *connected* mesh, so it doesn't extend to multiple independent on-screen
-// objects (nothing to propagate across between two objects that share no
-// edges/vertices), and a robust implementation is roughly 3x the code of
-// this Roberts'-style version. Roberts' generalizes to multiple objects for
-// free -- it never distinguishes "occluded by another part of this shape"
-// from "occluded by a different object" in the first place.
-//
-// None of the per-candidate-face math here costs anything on the emulated
-// Z80 (same idealized zero-T-state coprocessor model as
-// cordic_project_point_w above).
-//
-// LOAD half of CORDIC_HIDDEN_LINE's wire protocol (port 0xc8) -- see
-// cordic_hidden_line_args_t's comment (sega-vector/3d's game.c) for the
-// load/run split. Fired once per shape switch; just latches everything that
-// doesn't change between calls into persistent members, no computation
-// happens here.
-//
-// wire format (26 bytes):
-//   0: px8_ptr (u16)          -- shape3dFrame's rotated/shrunk vertex arrays (silhouette + depth tests)
-//   2: py8_ptr (u16)
-//   4: pz8_ptr (u16)
-//   6: px_ptr (u16)           -- real-world-scale (int16) rotated vertex arrays (final segment coords)
-//   8: py_ptr (u16)
-//  10: faces_ptr (u16)        -- shape->faces, u8[face_count][4]
-//  12: face_colors_ptr (u16)  -- shape->face_colors, u8[face_count], one SEGA_COLOR_* byte per face
-//  14: edges_ptr (u16)        -- shape->edges, u8[edge_count][4] (v0,v1,faceA,faceB)
-//  16: edge_count (u8)
-//  17: edge_colors_ptr (u16)  -- shape->edge_colors, u8[edge_count] per-edge override, 0xFF="no override"; NULL(0) if unused
-//  19: part_face_end_ptr (u16)
-//  21: part_count (u8)
-//  22: dest_max (u16)         -- capacity of dest, in vector_t entries (shape_max_vec) -- safety cap, never overflowed
-//  24: count_ptr (u16)        -- output: u16, how many vector_t entries were actually written
-void segag80v_state::cordic_hidden_line_load_w(u8 data)
+void segag80v_state::z80gpu_ctrl_w(u8 data)
 {
-	m_hl_load_data[m_hl_load_windex] = data;
-	m_hl_load_windex = (m_hl_load_windex + 1) % 26;
-	if (m_hl_load_windex != 0)
+	if (data & 0x02) { // ABORT
+		m_accel_busy_until = machine().time();
+		return;
+	}
+	if (!(data & 0x01)) // START
+		return;
+	if (machine().time() < m_accel_busy_until) // ignored while busy, same as LOAD_DATA
 		return;
 
-	auto rd16 = [this](int off) -> u16 { return m_hl_load_data[off] | (m_hl_load_data[off + 1] << 8); };
+	z80gpu_run_frame();
+	m_accel_vec_data_idx = 0;
 
-	m_hl_px8_ptr           = rd16(0);
-	m_hl_py8_ptr           = rd16(2);
-	m_hl_pz8_ptr           = rd16(4);
-	m_hl_px_ptr            = rd16(6);
-	m_hl_py_ptr            = rd16(8);
-	m_hl_faces_ptr         = rd16(10);
-	m_hl_face_colors_ptr   = rd16(12);
-	m_hl_edges_ptr         = rd16(14);
-	m_hl_edge_count        = m_hl_load_data[16];
-	m_hl_edge_colors_ptr   = rd16(17);
-	m_hl_part_face_end_ptr = rd16(19);
-	m_hl_part_count        = m_hl_load_data[21];
-	m_hl_dest_max          = rd16(22);
-	m_hl_count_ptr         = rd16(24);
+	// Estimated real-hardware latency from accel_rotate.v/accel_cull.v's
+	// own FSM cycle counts at clk_cpu (50MHz, 20ns/cycle): ~22 cycles/vertex
+	// (12 for the 6-byte serial vert read, 1 shift, 1 yaw, 1 pitch, 4+3
+	// for the 7-byte scratch write) and ~21 cycles/face (6 for the 3-byte
+	// face-index read, 12 for the 6-byte coordinate read, 2 mul, 1 combine,
+	// amortized face_vis writes). Results are already written to
+	// m_accel_scratch_mem above; only the BUSY/DONE bits a polling Z80
+	// sees are delayed, so a real polling loop experiences a realistic
+	// wait instead of DONE on the very next instruction.
+	const z80gpu_accel::ShapeInfo &shape = (m_accel_shape_select < z80gpu_accel::SHAPE_COUNT)
+		? z80gpu_accel::kShapes[m_accel_shape_select] : z80gpu_accel::kShapes[0];
+	u32 cycles = shape.vertex_count * 22u + shape.face_count * 21u;
+	m_accel_busy_until = machine().time() + attotime::from_nsec(cycles * 20);
 }
 
-
-// RUN half of CORDIC_HIDDEN_LINE's wire protocol (port 0xc6, unchanged) --
-// fired every call with just the two fields that actually change (see
-// cordic_hidden_line_load_w above for the LOAD half).
-//
-// wire format (4 bytes): face_vis_ptr (u16), dest_ptr (u16)
-void segag80v_state::cordic_hidden_line_w(u8 data)
+u8 segag80v_state::z80gpu_ctrl_r()
 {
-	m_hl_data[m_hl_windex] = data;
-	m_hl_windex = (m_hl_windex + 1) % 4;
-	if (m_hl_windex != 0)
+	bool busy = machine().time() < m_accel_busy_until;
+	return (busy ? 0x01 : 0x00) | (busy ? 0x00 : 0x02); // bit0 BUSY, bit1 DONE; bit2 OVERFLOW always 0 (accel_top.v has no dest_max guard yet -- see z80gpu_run_frame's own comment on the scratch_mem-bounds check that stands in for one here)
+}
+
+void segag80v_state::z80gpu_shape_select_w(u8 data) { m_accel_shape_select = data; }
+void segag80v_state::z80gpu_yaw_lo_w(u8 data)   { m_accel_yaw   = (m_accel_yaw   & 0xFF00) | data; }
+void segag80v_state::z80gpu_yaw_hi_w(u8 data)   { m_accel_yaw   = (m_accel_yaw   & 0x00FF) | (u16(data) << 8); }
+void segag80v_state::z80gpu_pitch_lo_w(u8 data) { m_accel_pitch = (m_accel_pitch & 0xFF00) | data; }
+void segag80v_state::z80gpu_pitch_hi_w(u8 data) { m_accel_pitch = (m_accel_pitch & 0x00FF) | (u16(data) << 8); }
+
+u8 segag80v_state::z80gpu_vec_count_lo_r() { return (u8)m_accel_vec_count; }
+u8 segag80v_state::z80gpu_vec_count_hi_r() { return (u8)(m_accel_vec_count >> 8); }
+
+// Burst-read from the vector_t chain z80gpu_run_frame's STAGE3_VECBUILD
+// wrote into m_accel_scratch_mem at ACCEL_SCR_VECBUF_BASE -- auto-
+// increments per read, matching accel_top.v's VEC_DATA port exactly. A Z80
+// driver reads VEC_COUNT first and bursts exactly count*4 bytes, so there's
+// no bounds check here (same trust accel_top.v itself places in the Z80
+// side behaving that way).
+u8 segag80v_state::z80gpu_vec_data_r()
+{
+	u8 data = m_accel_scratch_mem[ACCEL_SCR_VECBUF_BASE + m_accel_vec_data_idx];
+	m_accel_vec_data_idx++;
+	return data;
+}
+
+void segag80v_state::z80gpu_load_addr_lo_w(u8 data) { m_accel_load_addr = (m_accel_load_addr & 0xFF00) | data; }
+void segag80v_state::z80gpu_load_addr_hi_w(u8 data) { m_accel_load_addr = (m_accel_load_addr & 0x00FF) | (u16(data) << 8); }
+
+void segag80v_state::z80gpu_load_data_w(u8 data)
+{
+	if (machine().time() < m_accel_busy_until) // hardware interlock, per accel_top.v's port map
 		return;
-
-	auto rd16 = [this](int off) -> u16 { return m_hl_data[off] | (m_hl_data[off + 1] << 8); };
-
-	u16 px8_ptr           = m_hl_px8_ptr;
-	u16 py8_ptr           = m_hl_py8_ptr;
-	u16 pz8_ptr           = m_hl_pz8_ptr;
-	u16 px_ptr            = m_hl_px_ptr;
-	u16 py_ptr            = m_hl_py_ptr;
-	u16 faces_ptr         = m_hl_faces_ptr;
-	u16 face_colors_ptr   = m_hl_face_colors_ptr;
-	u16 edges_ptr         = m_hl_edges_ptr;
-	u8  edge_count        = m_hl_edge_count;
-	u16 edge_colors_ptr   = m_hl_edge_colors_ptr;
-	u16 face_vis_ptr      = rd16(0);
-	u16 part_face_end_ptr = m_hl_part_face_end_ptr;
-	u8  part_count        = m_hl_part_count;
-	u16 dest_ptr          = rd16(2);
-	u16 dest_max          = m_hl_dest_max;
-	u16 count_ptr         = m_hl_count_ptr;
-
-	address_space &prog = m_maincpu->space(AS_PROGRAM);
-
-	auto px8 = [&](int i) -> int { return (int8_t)prog.read_byte(px8_ptr + i); };
-	auto py8 = [&](int i) -> int { return (int8_t)prog.read_byte(py8_ptr + i); };
-	auto pz8 = [&](int i) -> int { return (int8_t)prog.read_byte(pz8_ptr + i); };
-	auto px16 = [&](int i) -> int16_t { return (int16_t)(prog.read_byte(px_ptr + i*2) | (prog.read_byte(px_ptr + i*2 + 1) << 8)); };
-	auto py16 = [&](int i) -> int16_t { return (int16_t)(prog.read_byte(py_ptr + i*2) | (prog.read_byte(py_ptr + i*2 + 1) << 8)); };
-	auto face_vis  = [&](int j) { return (prog.read_byte(face_vis_ptr + (j >> 3)) >> (j & 7)) & 1; };
-	auto face_v    = [&](int f, int k) { return prog.read_byte(faces_ptr + f * 4 + k); }; // face f's vertex index k (0-3)
-	auto face_color = [&](int f) -> u8 { return prog.read_byte(face_colors_ptr + f); };
-	auto edge_v    = [&](int e, int k) { return prog.read_byte(edges_ptr + e * 4 + k); }; // edge e's field k: v0,v1,faceA,faceB
-	auto part_end  = [&](int p) { return prog.read_byte(part_face_end_ptr + p); };
-
-	// which part owns each face -- part_face_end's boundaries are
-	// monotonic, same single forward pass game.c's Z80 version used to do
-	u8 face_part[256];
-	{
-		int part_i = 0;
-		int face_count_total = part_count ? part_end(part_count - 1) : 0; // last part's end == shape's face_count
-		for (int f = 0; f < face_count_total; f++) {
-			while (f >= part_end(part_i)) part_i++;
-			face_part[f] = part_i;
-		}
-	}
-
-	// clip [lo,hi] (in/out, a subinterval of t in [0,1]) against the
-	// half-plane "A + t*B < 0" -- used both for a candidate face's polygon
-	// edges (silhouette) and its depth-plane test (see below), since both
-	// reduce to exactly this shape once expanded in terms of t. Returns
-	// false if the interval becomes empty (fully outside this constraint).
-	auto clip_halfplane = [](double A, double B, double &lo, double &hi) -> bool {
-		if (B == 0.0) {
-			if (A >= 0.0) return false; // constant and outside: no t satisfies it
-			return lo <= hi;            // constant and inside: no restriction
-		}
-		double troot = -A / B;
-		if (B > 0.0) { if (troot < hi) hi = troot; }
-		else         { if (troot > lo) lo = troot; }
-		return lo <= hi;
-	};
-
-	// silhouette clip: segment (p0x,p0y)-(p1x,p1y) against the convex
-	// polygon poly (3 or 4 verts, in the shape data's own winding order --
-	// "inside" is cross(edge_dir, Q-E) < 0 for every polygon edge, the same
-	// convention pointInTriangle/xy_cross_negative already use elsewhere in
-	// this driver). Degenerates to a triangle clip when poly.size()==3.
-	auto clip_to_polygon = [&](const std::vector<std::pair<double,double>> &poly,
-	                            double p0x, double p0y, double p1x, double p1y,
-	                            double &lo, double &hi) -> bool {
-		int n = (int)poly.size();
-		for (int i = 0; i < n; i++) {
-			double ex = poly[i].first, ey = poly[i].second;
-			double fx = poly[(i + 1) % n].first, fy = poly[(i + 1) % n].second;
-			double edx = fx - ex, edy = fy - ey;
-			double A = edx * (p0y - ey) - edy * (p0x - ex);
-			double B = edx * (p1y - p0y) - edy * (p1x - p0x);
-			if (!clip_halfplane(A, B, lo, hi)) return false;
-		}
-		return lo <= hi;
-	};
-
-	// raw (signed) triple-product depth value -- same formula as
-	// cordic_triple_sign_w above, dot<0 means "behind the face's plane"
-	// (occluded); kept as a plain double here (not just its sign) since the
-	// depth constraint needs to be solved as a linear function of t too.
-	auto plane_dot = [&](int f0, int f1, int f2, int q) -> double {
-		double ax = px8(f0), ay = py8(f0), az = pz8(f0);
-		double bx = px8(f1), by = py8(f1), bz = pz8(f1);
-		double cx = px8(f2), cy = py8(f2), cz = pz8(f2);
-		double qx = px8(q),  qy = py8(q),  qz = pz8(q);
-		double ux = bx - ax, uy = by - ay, uz = bz - az;
-		double vx = cx - ax, vy = cy - ay, vz = cz - az;
-		double dx = qx - ax, dy = qy - ay, dz = qz - az;
-		double nx = uy * vz - uz * vy;
-		double ny = uz * vx - ux * vz;
-		double nz = ux * vy - uy * vx;
-		return nx * dx + ny * dy + nz * dz;
-	};
-
-	static constexpr u8 COLOR_CLEAR = 0;      // SEGA_CLEAR, sega.h
-	static constexpr u8 COLOR_LAST  = 0x80;   // SEGA_LAST, sega.h
-	static constexpr u8 EDGE_COLOR_NONE = 0xFF; // shape3d_t's edge_colors sentinel, sega.h
-
-	u16 write_idx = 0;
-	auto emit = [&](u8 color, double dx, double dy) -> bool {
-		if (write_idx >= dest_max) return false;
-		u8 magnitude; u16 direction;
-		polarToVector((int16_t)std::lround(dx), (int16_t)std::lround(dy), &magnitude, &direction);
-		u16 addr = dest_ptr + write_idx * 4;
-		prog.write_byte(addr + 0, color);
-		prog.write_byte(addr + 1, magnitude);
-		prog.write_byte(addr + 2, (u8)direction);
-		prog.write_byte(addr + 3, (u8)(direction >> 8));
-		write_idx++;
-		return true;
-	};
-
-	double penx = 0.0, peny = 0.0;
-
-	// diagnostic only: how many (edge, candidate-face) pairs actually get considered vs.
-	// how many survive the silhouette clip to reach plane_dot -- turns the "zero-cost
-	// coprocessor" assumption into a real number instead of an order-of-magnitude guess.
-	u32 candidate_pairs = 0;
-	u32 plane_dot_pairs = 0;
-
-	for (int i = 0; i < edge_count; i++) {
-		int v0 = edge_v(i, 0), v1 = edge_v(i, 1), fa = edge_v(i, 2), fb = edge_v(i, 3);
-		if (!face_vis(fa) && !face_vis(fb)) continue; // both adjacent faces hidden -> edge hidden, same as before
-
-		// color from whichever adjacent face is front-facing (prefer fa),
-		// unless this edge has its own override -- see shape3d_t's comment
-		// (sega.h) on edge_colors for why (e.g. legoman's eyes/mouth marks,
-		// which share a face with no color of their own to draw from).
-		u8 edge_color = face_vis(fa) ? face_color(fa) : face_color(fb);
-		if (edge_colors_ptr != 0) {
-			u8 override_color = prog.read_byte(edge_colors_ptr + i);
-			if (override_color != EDGE_COLOR_NONE) edge_color = override_color;
-		}
-
-		int part_a = face_part[fa], part_b = face_part[fb];
-		double sx0 = px8(v0), sy0 = py8(v0), sx1 = px8(v1), sy1 = py8(v1);
-
-		std::vector<std::pair<double,double>> removed; // (lo,hi) pairs
-		for (int p = 0; p < part_count; p++) {
-			if (p == part_a || p == part_b) continue;
-			int start = p ? part_end(p - 1) : 0;
-			int end = part_end(p);
-			for (int j = start; j < end; j++) {
-				if (!face_vis(j)) continue;
-				candidate_pairs++;
-
-				int f0 = face_v(j, 0), f1 = face_v(j, 1), f2 = face_v(j, 2), f3 = face_v(j, 3);
-				std::vector<std::pair<double,double>> poly;
-				poly.push_back({(double)px8(f0), (double)py8(f0)});
-				poly.push_back({(double)px8(f1), (double)py8(f1)});
-				poly.push_back({(double)px8(f2), (double)py8(f2)});
-				if (f3 != f2) poly.push_back({(double)px8(f3), (double)py8(f3)});
-
-				double lo = 0.0, hi = 1.0;
-				if (!clip_to_polygon(poly, sx0, sy0, sx1, sy1, lo, hi)) continue;
-
-				plane_dot_pairs++;
-				double dot0 = plane_dot(f0, f1, f2, v0);
-				double dot1 = plane_dot(f0, f1, f2, v1);
-				if (!clip_halfplane(dot0, dot1 - dot0, lo, hi)) continue;
-
-				if (hi - lo > 1e-9) removed.push_back({lo, hi});
-			}
-		}
-
-		// merge overlapping/adjacent occluded intervals, then take the
-		// complement within [0,1] to get the visible sub-segment(s)
-		std::sort(removed.begin(), removed.end());
-		std::vector<std::pair<double,double>> merged;
-		for (auto &iv : removed) {
-			if (!merged.empty() && iv.first <= merged.back().second) {
-				if (iv.second > merged.back().second) merged.back().second = iv.second;
-			} else {
-				merged.push_back(iv);
-			}
-		}
-		std::vector<std::pair<double,double>> visible;
-		double cursor = 0.0;
-		for (auto &iv : merged) {
-			if (iv.first > cursor) visible.push_back({cursor, iv.first});
-			if (iv.second > cursor) cursor = iv.second;
-		}
-		if (cursor < 1.0) visible.push_back({cursor, 1.0});
-
-		double x0 = px16(v0), y0 = py16(v0), x1 = px16(v1), y1 = py16(v1);
-		bool overflowed = false;
-		for (auto &iv : visible) {
-			if (iv.second - iv.first < 1e-6) continue;
-			double sx = x0 + iv.first  * (x1 - x0), sy = y0 + iv.first  * (y1 - y0);
-			double ex = x0 + iv.second * (x1 - x0), ey = y0 + iv.second * (y1 - y0);
-
-			double dx = sx - penx, dy = sy - peny;
-			if (dx != 0.0 || dy != 0.0) {
-				// same >160 pen-up split rule cullAndBuild used to apply
-				if (std::abs(dx) > 160.0 || std::abs(dy) > 160.0) {
-					double midx = penx + dx / 2.0, midy = peny + dy / 2.0;
-					if (!emit(COLOR_CLEAR, midx - penx, midy - peny)) { overflowed = true; break; }
-					if (!emit(COLOR_CLEAR, sx - midx, sy - midy))     { overflowed = true; break; }
-				} else {
-					if (!emit(COLOR_CLEAR, dx, dy)) { overflowed = true; break; }
-				}
-			}
-			if (!emit(edge_color, ex - sx, ey - sy)) { overflowed = true; break; }
-			penx = ex; peny = ey;
-		}
-		if (overflowed) break;
-	}
-
-	if (write_idx > 0) {
-		u16 last_addr = dest_ptr + (write_idx - 1) * 4;
-		u8 last_color = prog.read_byte(last_addr + 0);
-		prog.write_byte(last_addr + 0, last_color | COLOR_LAST);
-	}
-	prog.write_byte(count_ptr + 0, (u8)write_idx);
-	prog.write_byte(count_ptr + 1, (u8)(write_idx >> 8));
-
-	printf("%s: cordic_hidden_line_w: %u edges, %u candidate pairs, %u reached plane_dot (%.1f%% survival), %u vectors emitted\n",
-			machine().scheduler().time().as_string(), edge_count, candidate_pairs, plane_dot_pairs,
-			candidate_pairs ? (100.0 * plane_dot_pairs / candidate_pairs) : 0.0, write_idx);
+	m_accel_shape_mem[m_accel_load_addr & 0x0FFF] = data;
+	m_accel_load_addr++;
 }
 
 
@@ -1217,6 +830,31 @@ void segag80v_state::main_portmap(address_map &map)
 	map(0xc6, 0xc6).w(FUNC(segag80v_state::cordic_hidden_line_w)); // write-only, see its own comment (RUN half)
 	map(0xc7, 0xc7).w(FUNC(segag80v_state::cordic_project_point_load_w)); // write-only, LOAD half, see its own comment
 	map(0xc8, 0xc8).w(FUNC(segag80v_state::cordic_hidden_line_load_w)); // write-only, LOAD half, see its own comment
+
+	// z80gpu 3D accelerator port map (0xC9-0xD4) -- accel_top.v's actual
+	// protocol, byte-oriented against an internal shape_mem the Z80 loads
+	// explicitly via LOAD_ADDR/LOAD_DATA (no bus mastering, matching the
+	// project's "minimize bus access" design goal). Deliberately placed at
+	// a disjoint range from 0xC0-0xC8 above (that's a DMA-pointer/struct
+	// protocol where the coprocessor walks Z80 memory directly -- a
+	// structurally different, older idealized model) so both protocols
+	// live in this one portmap: whichever a given ROM's own #if doesn't
+	// use is simply never written/read. No separate driver variant needed
+	// just to reach these ports -- any existing config (zektor/startrek,
+	// or their _fpga bus-timing variants) already routes here.
+	map(0xc9, 0xc9).w(FUNC(segag80v_state::z80gpu_ctrl_w));
+	map(0xc9, 0xc9).r(FUNC(segag80v_state::z80gpu_ctrl_r));
+	map(0xca, 0xca).w(FUNC(segag80v_state::z80gpu_shape_select_w));
+	map(0xcb, 0xcb).w(FUNC(segag80v_state::z80gpu_yaw_lo_w));
+	map(0xcc, 0xcc).w(FUNC(segag80v_state::z80gpu_yaw_hi_w));
+	map(0xcd, 0xcd).w(FUNC(segag80v_state::z80gpu_pitch_lo_w));
+	map(0xce, 0xce).w(FUNC(segag80v_state::z80gpu_pitch_hi_w));
+	map(0xcf, 0xcf).r(FUNC(segag80v_state::z80gpu_vec_count_lo_r));
+	map(0xd0, 0xd0).r(FUNC(segag80v_state::z80gpu_vec_count_hi_r));
+	map(0xd1, 0xd1).r(FUNC(segag80v_state::z80gpu_vec_data_r));
+	map(0xd2, 0xd2).w(FUNC(segag80v_state::z80gpu_load_addr_lo_w));
+	map(0xd3, 0xd3).w(FUNC(segag80v_state::z80gpu_load_addr_hi_w));
+	map(0xd4, 0xd4).w(FUNC(segag80v_state::z80gpu_load_data_w));
 
 	map(0xf9, 0xf9).mirror(0x04).w(FUNC(segag80v_state::coin_count_w));
 	map(0xf8, 0xfb).r(FUNC(segag80v_state::mangled_ports_r));
@@ -1694,6 +1332,16 @@ void segag80v_state::zektor(machine_config &config)
 	SEGA_SPEECH_BOARD(config, "speech", 0).add_route(ALL_OUTPUTS, "speaker", 1.0);
 }
 
+// z80gpu FPGA-replacement timing model -- see FPGA_CPU_CLOCK's own comment.
+// Everything else (video, sound, security, I/O) is identical to zektor();
+// only the Z80's clock changes here, since init_zektor_fpga() (not this
+// function) is what actually overrides the per-access cycle costs.
+void segag80v_state::zektor_fpga(machine_config &config)
+{
+	zektor(config);
+	m_maincpu->set_clock(FPGA_CPU_CLOCK);
+}
+
 void segag80v_state::tacscan(machine_config &config)
 {
 	g80v_base(config);
@@ -1706,6 +1354,15 @@ void segag80v_state::startrek(machine_config &config)
 	SEGAUSB(config, m_usb, 0, m_maincpu).add_route(ALL_OUTPUTS, "speech", 1.0, 1);
 	SEGA_SPEECH_BOARD(config, "speech", 0).add_route(ALL_OUTPUTS, "speaker", 1.0);
 }
+
+// z80gpu FPGA-replacement timing model -- see FPGA_CPU_CLOCK's own comment
+// and zektor_fpga()'s comment (same pattern).
+void segag80v_state::startrek_fpga(machine_config &config)
+{
+	startrek(config);
+	m_maincpu->set_clock(FPGA_CPU_CLOCK);
+}
+
 
 
 
@@ -1999,6 +1656,53 @@ ROM_START( zektor )
 	ROM_LOAD( "pr-82.cpu-u15",   0x0400, 0x0020, CRC(c609b79e) SHA1(49dbcbb607079a182d7eb396c0da097166ea91c9) ) // CPU board addressing
 ROM_END
 
+// z80gpu FPGA-replacement timing model -- bit-identical ROMs to zektor,
+// clocked/timed per FPGA_CPU_CLOCK instead (see that comment, and
+// zektor_fpga()/init_zektor_fpga()). Same file names/CRCs as zektor's
+// ROM_START on purpose: MAME's merged-set loading resolves these from
+// zektor's own ROM zip since GAME() below marks this as its clone, so no
+// separate zektorfpga zip is needed.
+ROM_START( zektorfpga )
+	ROM_REGION( 0xc000, "maincpu", 0 )
+	ROM_LOAD( "1611.cpu-u25",    0x0000, 0x0800, CRC(6245aa23) SHA1(815f3c7edad9c290b719a60964085e90e7268112) )
+	ROM_LOAD( "1586.prom-u1",    0x0800, 0x0800, CRC(efeb4fb5) SHA1(b337179c01870c953b8d38c20263802e9a7936d3) )
+	ROM_LOAD( "1587.prom-u2",    0x1000, 0x0800, CRC(daa6c25c) SHA1(061e390775b6dd24f85d51951267bca4339a3845) )
+	ROM_LOAD( "1588.prom-u3",    0x1800, 0x0800, CRC(62b67dde) SHA1(831bad0f5a601d6859f69c70d0962c970d92db0e) )
+	ROM_LOAD( "1589.prom-u4",    0x2000, 0x0800, CRC(c2db0ba4) SHA1(658773f2b56ea805d7d678e300f9bbc896fbf176) )
+	ROM_LOAD( "1590.prom-u5",    0x2800, 0x0800, CRC(4d948414) SHA1(f60d295b0f8f798126dbfdc197943d8511238390) )
+	ROM_LOAD( "1591.prom-u6",    0x3000, 0x0800, CRC(b0556a6c) SHA1(84b481cc60dc3df3a1cf18b1ece4c70bcc7bb5a1) )
+	ROM_LOAD( "1592.prom-u7",    0x3800, 0x0800, CRC(750ecadf) SHA1(83ddd482230fbf6cf78a054fb4abd5bc8aec3ec8) )
+	ROM_LOAD( "1593.prom-u8",    0x4000, 0x0800, CRC(34f8850f) SHA1(d93594e529aca8d847c9f1e9055f1840f6069fb2) )
+	ROM_LOAD( "1594.prom-u9",    0x4800, 0x0800, CRC(52b22ab2) SHA1(c8f822a1a54081cfc88149c97b4dc19aa745a8d5) )
+	ROM_LOAD( "1595.prom-u10",   0x5000, 0x0800, CRC(a704d142) SHA1(95c1249a8efd1a69972ffd7a4da76a0bca5095d9) )
+	ROM_LOAD( "1596.prom-u11",   0x5800, 0x0800, CRC(6975e33d) SHA1(3f12037edd6f1b803b5f864789f4b88958ac9578) )
+	ROM_LOAD( "1597.prom-u12",   0x6000, 0x0800, CRC(d48ab5c2) SHA1(3f4faf4b131b120b30cd4e73ff34d5cd7ef6c47a) )
+	ROM_LOAD( "1598.prom-u13",   0x6800, 0x0800, CRC(ab54a94c) SHA1(9dd57b4b6e46d46922933128d9786df011c6133d) )
+	ROM_LOAD( "1599.prom-u14",   0x7000, 0x0800, CRC(c9d4f3a5) SHA1(8516914b49fad85222cbdd9a43609834f5d0f13d) )
+	ROM_LOAD( "1600.prom-u15",   0x7800, 0x0800, CRC(893b7dbc) SHA1(136135f0be2e8dddfa0d21a5f4119ee4685c4866) )
+	ROM_LOAD( "1601.prom-u16",   0x8000, 0x0800, CRC(867bdf4f) SHA1(5974d32d878206abd113f74ba20fa5276cf21a6f) )
+	ROM_LOAD( "1602.prom-u17",   0x8800, 0x0800, CRC(bd447623) SHA1(b8d255aeb32096891379330c5b8adf1d151d70c2) )
+	ROM_LOAD( "1603.prom-u18",   0x9000, 0x0800, CRC(9f8f10e8) SHA1(ffe9d872d9011b3233cb06d966852319f9e4cd01) )
+	ROM_LOAD( "1604.prom-u19",   0x9800, 0x0800, CRC(ad2f0f6c) SHA1(494a224905b1dac58b3b50f65a8be986b68b06f2) )
+	ROM_LOAD( "1605.prom-u20",   0xa000, 0x0800, CRC(e27d7144) SHA1(5b82fda797d86e11882d1f9738a59092c5e3e7d8) )
+	ROM_LOAD( "1606.prom-u21",   0xa800, 0x0800, CRC(7965f636) SHA1(5c8720beedab4979a813ce7f0e8961c863973ff7) )
+
+	ROM_REGION( 0x0800, "speech:cpu", 0 )
+	ROM_LOAD( "1607.speech-u7",  0x0000, 0x0800, CRC(b779884b) SHA1(ac07e99717a1f51b79f3e43a5d873ebfa0559320) )
+
+	ROM_REGION( 0x0020, "speech:proms", 0 )
+	ROM_LOAD( "6331.speech-u30", 0x0000, 0x0020, CRC(adcb81d0) SHA1(74b0efc7e8362b0c98e54a6107981cff656d87e1) ) // speech board addressing
+
+	ROM_REGION( 0x4000, "speech:data", 0 )
+	ROM_LOAD( "1608.speech-u6",  0x0000, 0x1000, CRC(637e2b13) SHA1(8a470f9a8a722f7ced340c4d32b4cf6f05b3e848) )
+	ROM_LOAD( "1609.speech-u5",  0x1000, 0x1000, CRC(675ee8e5) SHA1(e314482028b8925ad02e833a1d22224533d0a683) )
+	ROM_LOAD( "1610.speech-u4",  0x2000, 0x1000, CRC(2915c7bd) SHA1(3ed98747b5237aa1b3bab6866292370dc2c7655a) )
+
+	ROM_REGION( 0x0420, "proms", 0 )
+	ROM_LOAD( "s-c.xyt-u39",     0x0000, 0x0400, CRC(56484d19) SHA1(61f43126fdcfc230638ed47085ae037a098e6781) ) // sine table
+	ROM_LOAD( "pr-82.cpu-u15",   0x0400, 0x0020, CRC(c609b79e) SHA1(49dbcbb607079a182d7eb396c0da097166ea91c9) ) // CPU board addressing
+ROM_END
+
 
 ROM_START( tacscan )
 	ROM_REGION( 0xc000, "maincpu", 0 )
@@ -2031,6 +1735,7 @@ ROM_START( tacscan )
 ROM_END
 
 
+
 ROM_START( startrek )
 	ROM_REGION( 0xc000, "maincpu", 0 )
 	ROM_LOAD( "1873.cpu-u25",    0x0000, 0x0800, CRC(be46f5d9) SHA1(fadf13042d31b0dacf02a3166545c946f6fd3f33) )
@@ -2059,23 +1764,73 @@ ROM_START( startrek )
 	ROM_LOAD( "1870.prom-u23",   0xb800, 0x0800, CRC(4340616d) SHA1(e93686a29377933332523425532d102e30211111) )
 
 	ROM_REGION( 0x0800, "speech:cpu", 0 )
-//	ROM_LOAD( "1607.speech-u7",  0x0000, 0x0800, CRC(b779884b) SHA1(ac07e99717a1f51b79f3e43a5d873ebfa0559320) )
-	// that's weird, no idea why the source was using 1607, but the actual rom is 1670
-	ROM_LOAD( "1670.speech-u7",  0x0000, 0x0800, CRC(0) SHA1(0) )
+	ROM_LOAD( "1670.speech-u7",  0x0000, 0x0800, CRC(b779884b) SHA1(ac07e99717a1f51b79f3e43a5d873ebfa0559320) )
 
 	ROM_REGION( 0x0020, "speech:proms", 0 )
 	ROM_LOAD( "6331.speech-u30", 0x0000, 0x0020, CRC(adcb81d0) SHA1(74b0efc7e8362b0c98e54a6107981cff656d87e1) ) // speech board addressing
 
 	ROM_REGION( 0x4000, "speech:data", 0 )
-	ROM_LOAD( "1871.speech-u6",  0x0000, 0x1000, CRC(0) SHA1(0) )
-	ROM_LOAD( "1872.speech-u5",  0x1000, 0x1000, CRC(0) SHA1(0) )
-	ROM_LOAD( "187x.speech-u4",  0x2000, 0x1000, CRC(0) SHA1(0) )
-	ROM_LOAD( "187x.speech-u3",  0x3000, 0x1000, CRC(0) SHA1(0) )
+	ROM_LOAD( "1871.speech-u6",  0x0000, 0x1000, CRC(03713920) SHA1(25a0158cab9983248e91133f96d1849c9e9bcbd2) )
+	ROM_LOAD( "1872.speech-u5",  0x1000, 0x1000, CRC(ebb5c3a9) SHA1(533b6f0499b311f561cf7aba14a7f48ca7c47321) )
 
 	ROM_REGION( 0x0420, "proms", 0 )
 	ROM_LOAD( "s-c.xyt-u39",     0x0000, 0x0400, CRC(56484d19) SHA1(61f43126fdcfc230638ed47085ae037a098e6781) ) // sine table
 	ROM_LOAD( "pr-82.cpu-u15",   0x0400, 0x0020, CRC(c609b79e) SHA1(49dbcbb607079a182d7eb396c0da097166ea91c9) ) // CPU board addressing
 ROM_END
+
+// z80gpu FPGA-replacement timing model -- bit-identical ROMs to startrek,
+// clocked/timed per FPGA_CPU_CLOCK instead (see that comment, and
+// startrek_fpga()/init_startrek_fpga()). Same file names/CRCs as startrek's
+// ROM_START on purpose: MAME's merged-set loading resolves these from
+// startrek's own ROM zip since GAME() below marks this as its clone.
+ROM_START( startrekfpga )
+	ROM_REGION( 0xc000, "maincpu", 0 )
+	ROM_LOAD( "1873.cpu-u25",    0x0000, 0x0800, CRC(be46f5d9) SHA1(fadf13042d31b0dacf02a3166545c946f6fd3f33) )
+	ROM_LOAD( "1848.prom-u1",    0x0800, 0x0800, CRC(65e3baf3) SHA1(0c081ed6c8be0bb5eb3d5769ac1f0b8fe4735d11) )
+	ROM_LOAD( "1849.prom-u2",    0x1000, 0x0800, CRC(8169fd3d) SHA1(439d4b857083ae40df7d7f53c36ec13b05d86a86) )
+	ROM_LOAD( "1850.prom-u3",    0x1800, 0x0800, CRC(78fd68dc) SHA1(fb56567458807d9becaacac11091931af9889620) )
+	ROM_LOAD( "1851.prom-u4",    0x2000, 0x0800, CRC(3f55ab86) SHA1(f75ce0c56e22e8758dd1f5ce9ac00f5f41b13465) )
+	ROM_LOAD( "1852.prom-u5",    0x2800, 0x0800, CRC(2542ecfb) SHA1(7cacee44670768e9fae1024f172b867193d2ea4a) )
+	ROM_LOAD( "1853.prom-u6",    0x3000, 0x0800, CRC(75c2526a) SHA1(6e86b30fcdbe7622ab873092e7a7a46d8bad790f) )
+	ROM_LOAD( "1854.prom-u7",    0x3800, 0x0800, CRC(096d75d0) SHA1(26e90c296b00239a6cde4ec5e80cccd7bb36bcbd) )
+	ROM_LOAD( "1855.prom-u8",    0x4000, 0x0800, CRC(bc7b9a12) SHA1(6dc60e380dc5790cd345b06c064ea7d69570aadb) )
+	ROM_LOAD( "1856.prom-u9",    0x4800, 0x0800, CRC(ed9fe2fb) SHA1(5d56e8499cb4f54c5e76a9231c53d95777777e05) )
+	ROM_LOAD( "1857.prom-u10",   0x5000, 0x0800, CRC(28699d45) SHA1(c133eb4fc13987e634d3789bfeaf9e03196f8fd3) )
+	ROM_LOAD( "1858.prom-u11",   0x5800, 0x0800, CRC(3a7593cb) SHA1(7504f960507579d043b7ee20fb8fd2610399ff4b) )
+	ROM_LOAD( "1859.prom-u12",   0x6000, 0x0800, CRC(5b11886b) SHA1(b0fb6e912953822242501943f7214e4af6ab7891) )
+	ROM_LOAD( "1860.prom-u13",   0x6800, 0x0800, CRC(62eb96e6) SHA1(51d1f5e48e3e21147584ace61b8832ad892cb6e2) )
+	ROM_LOAD( "1861.prom-u14",   0x7000, 0x0800, CRC(99852d1d) SHA1(eaea6a99f0a7f0292db3ea19649b5c1be45b9507) )
+	ROM_LOAD( "1862.prom-u15",   0x7800, 0x0800, CRC(76ce27b2) SHA1(8fa8d73aa4dcf3709ecd057bad3278fac605988c) )
+	ROM_LOAD( "1863.prom-u16",   0x8000, 0x0800, CRC(dd92d187) SHA1(5a11cdc91bb7b36ea98503892847d8dbcedfe95a) )
+	ROM_LOAD( "1864.prom-u17",   0x8800, 0x0800, CRC(e37d3a1e) SHA1(15d949989431dcf1e0406f1e3745f3ee91012ff5) )
+	ROM_LOAD( "1865.prom-u18",   0x9000, 0x0800, CRC(b2ec8125) SHA1(70982c614471614f6b490ae2d65faec0eff2ac37) )
+	ROM_LOAD( "1866.prom-u19",   0x9800, 0x0800, CRC(6f188354) SHA1(e99946467090b68559c2b54ad2e85204b71a459f) )
+	ROM_LOAD( "1867.prom-u20",   0xa000, 0x0800, CRC(b0a3eae8) SHA1(51a0855753dc2d4fe1a05bd54fa958beeab35299) )
+	ROM_LOAD( "1868.prom-u21",   0xa800, 0x0800, CRC(8b4e2e07) SHA1(11f7de6327abf88012854417224b38a2352a9dc7) )
+	ROM_LOAD( "1869.prom-u22",   0xb000, 0x0800, CRC(e5663070) SHA1(735944c2b924964f72f3bb3d251a35ea2aef3d15) )
+	ROM_LOAD( "1870.prom-u23",   0xb800, 0x0800, CRC(4340616d) SHA1(e93686a29377933332523425532d102e30211111) )
+
+	ROM_REGION( 0x0800, "speech:cpu", 0 )
+	ROM_LOAD( "1670.speech-u7",  0x0000, 0x0800, CRC(b779884b) SHA1(ac07e99717a1f51b79f3e43a5d873ebfa0559320) )
+
+	ROM_REGION( 0x0020, "speech:proms", 0 )
+	ROM_LOAD( "6331.speech-u30", 0x0000, 0x0020, CRC(adcb81d0) SHA1(74b0efc7e8362b0c98e54a6107981cff656d87e1) ) // speech board addressing
+
+	ROM_REGION( 0x4000, "speech:data", 0 )
+	ROM_LOAD( "1871.speech-u6",  0x0000, 0x1000, CRC(03713920) SHA1(25a0158cab9983248e91133f96d1849c9e9bcbd2) )
+	ROM_LOAD( "1872.speech-u5",  0x1000, 0x1000, CRC(ebb5c3a9) SHA1(533b6f0499b311f561cf7aba14a7f48ca7c47321) )
+
+	// for startrek2 roms
+	// ROM_LOAD( "1871.speech-u6",  0x0000, 0x1000, CRC(0) SHA1(0) )
+	// ROM_LOAD( "1872.speech-u5",  0x1000, 0x1000, CRC(0) SHA1(0) )
+	// ROM_LOAD( "187x.speech-u4",  0x2000, 0x1000, CRC(0) SHA1(0) )
+	// ROM_LOAD( "187x.speech-u3",  0x3000, 0x1000, CRC(0) SHA1(0) )
+
+	ROM_REGION( 0x0420, "proms", 0 )
+	ROM_LOAD( "s-c.xyt-u39",     0x0000, 0x0400, CRC(56484d19) SHA1(61f43126fdcfc230638ed47085ae037a098e6781) ) // sine table
+	ROM_LOAD( "pr-82.cpu-u15",   0x0400, 0x0020, CRC(c609b79e) SHA1(49dbcbb607079a182d7eb396c0da097166ea91c9) ) // CPU board addressing
+ROM_END
+
 
 
 
@@ -2109,6 +1864,22 @@ void segag80v_state::init_waitstates()
 			m_maincpu->adjust_icount(-WAIT_STATES);
 		return data;
 	});
+}
+
+// z80gpu FPGA-replacement timing model, as an alternative to init_waitstates()
+// -- see FPGA_CPU_CLOCK's own comment for where these four numbers come from.
+// Unlike init_waitstates(), this doesn't need install_read_tap/write_tap at
+// all: z80_set_m1_cycles()/set_memrq_cycles()/set_iorq_cycles() are global
+// per-CPU cost overrides (z80.h), which is a faithful match for z80gpu's
+// actual hardware here -- its bus_wait_gen.v applies the same wait count to
+// every ROM and RAM address alike (ROM_WAIT_STATES == RAM_WAIT_STATES == 46
+// by default), so there's no address-decoded distinction to reproduce.
+void segag80v_state::init_waitstates_fpga()
+{
+	m_fpga_timing = true;
+	m_maincpu->z80_set_m1_cycles(FPGA_M1_CYCLES);
+	m_maincpu->z80_set_memrq_cycles(FPGA_MEMRQ_CYCLES);
+	m_maincpu->z80_set_iorq_cycles(FPGA_IORQ_CYCLES);
 }
 
 void segag80v_state::init_elim2()
@@ -2189,6 +1960,27 @@ void segag80v_state::init_zektor()
 	iospace.install_read_handler(0xfc, 0xfc, read8smo_delegate(*this, FUNC(segag80v_state::spinner_input_r)));
 }
 
+// z80gpu FPGA-replacement timing model -- identical to init_zektor() except
+// for the timing setup call; see init_waitstates_fpga()'s own comment.
+void segag80v_state::init_zektor_fpga()
+{
+	init_waitstates_fpga();
+
+	address_space &iospace = m_maincpu->space(AS_IO);
+
+	// configure security
+	m_decrypt = segag80_security(82);
+
+	// configure sound
+	iospace.install_write_handler(0x38, 0x38, write8smo_delegate(*m_speech, FUNC(sega_speech_device::data_w)));
+	iospace.install_write_handler(0x3b, 0x3b, write8smo_delegate(*m_speech, FUNC(sega_speech_device::control_w)));
+	iospace.install_write_handler(0x3c, 0x3d, write8sm_delegate(*m_g80_audio, FUNC(zektor_audio_device::write_ay)));
+	iospace.install_write_handler(0x3e, 0x3f, write8sm_delegate(*m_g80_audio, FUNC(zektor_audio_device::write)));
+
+	// configure inputs
+	iospace.install_write_handler(0xf8, 0xf8, write8smo_delegate(*this, FUNC(segag80v_state::spinner_select_w)));
+	iospace.install_read_handler(0xfc, 0xfc, read8smo_delegate(*this, FUNC(segag80v_state::spinner_input_r)));
+}
 
 void segag80v_state::init_tacscan()
 {
@@ -2219,8 +2011,8 @@ void segag80v_state::init_startrek()
 	address_space &iospace = m_maincpu->space(AS_IO);
 
 	// configure security
-	// m_decrypt = segag80_security(64);
-	m_decrypt = segag80_security(0); // security free
+	m_decrypt = segag80_security(64);
+	//m_decrypt = segag80_security(0); // security free
 
 	// configure sound
 	iospace.install_write_handler(0x38, 0x38, write8smo_delegate(*m_speech, FUNC(sega_speech_device::data_w)));
@@ -2235,7 +2027,31 @@ void segag80v_state::init_startrek()
 	iospace.install_read_handler(0xfc, 0xfc, read8smo_delegate(*this, FUNC(segag80v_state::spinner_input_r)));
 }
 
+// z80gpu FPGA-replacement timing model -- identical to init_startrek() except
+// for the timing setup call; see init_waitstates_fpga()'s own comment.
+void segag80v_state::init_startrek_fpga()
+{
+	init_waitstates_fpga();
 
+	address_space &pgmspace = m_maincpu->space(AS_PROGRAM);
+	address_space &iospace = m_maincpu->space(AS_IO);
+
+	// configure security
+	m_decrypt = segag80_security(64);
+	//m_decrypt = segag80_security(0); // security free
+
+	// configure sound
+	iospace.install_write_handler(0x38, 0x38, write8smo_delegate(*m_speech, FUNC(sega_speech_device::data_w)));
+	iospace.install_write_handler(0x3b, 0x3b, write8smo_delegate(*m_speech, FUNC(sega_speech_device::control_w)));
+
+	iospace.install_readwrite_handler(0x3f, 0x3f, read8smo_delegate(*m_usb, FUNC(usb_sound_device::status_r)), write8smo_delegate(*m_usb, FUNC(usb_sound_device::data_w)));
+	pgmspace.install_read_handler(0xd000, 0xdfff, read8sm_delegate(*m_usb, FUNC(usb_sound_device::ram_r)));
+	pgmspace.install_write_handler(0xd000, 0xdfff, write8sm_delegate(*this, FUNC(segag80v_state::usb_ram_w)));
+
+	// configure inputs
+	iospace.install_write_handler(0xf8, 0xf8, write8smo_delegate(*this, FUNC(segag80v_state::spinner_select_w)));
+	iospace.install_read_handler(0xfc, 0xfc, read8smo_delegate(*this, FUNC(segag80v_state::spinner_input_r)));
+}
 
 /*************************************
  *
@@ -2254,5 +2070,7 @@ GAME( 1981, spacfurya,  spacfury, spacfury,   spacfury, segag80v_state, init_spa
 GAME( 1981, spacfuryb,  spacfury, spacfury,   spacfury, segag80v_state, init_spacfury,   ORIENTATION_FLIP_Y,          "Sega",              "Space Fury (revision B)", 0 )
 GAME( 1981, spacfurybl, spacfury, spacfurybl, spacfury, segag80v_state, init_spacfurybl, ORIENTATION_FLIP_Y,          "bootleg (Rumiano)", "Advisor (Italian bootleg of Space Fury)", MACHINE_IMPERFECT_SOUND ) // TODO: hook up TMS5100 speech
 GAME( 1982, zektor,     0,        zektor,     zektor,   segag80v_state, init_zektor,     ORIENTATION_FLIP_Y,          "Sega",              "Zektor (revision B)", 0 )
+GAME( 1982, zektorfpga, zektor,   zektor_fpga,zektor,   segag80v_state, init_zektor_fpga,ORIENTATION_FLIP_Y,          "Sega",              "Zektor (revision B, z80gpu FPGA timing + 3D accelerator model)", MACHINE_UNOFFICIAL )
 GAME( 1982, tacscan,    0,        tacscan,    tacscan,  segag80v_state, init_tacscan,    ORIENTATION_FLIP_X ^ ROT270, "Sega",              "Tac/Scan", 0 )
 GAME( 1982, startrek,   0,        startrek,   startrek, segag80v_state, init_startrek,   ORIENTATION_FLIP_Y,          "Sega",              "Star Trek", 0 )
+GAME( 1982, startrekfpga,startrek,startrek_fpga,startrek,segag80v_state, init_startrek_fpga,ORIENTATION_FLIP_Y,       "Sega",              "Star Trek (z80gpu FPGA timing + 3D accelerator model)", MACHINE_UNOFFICIAL )
