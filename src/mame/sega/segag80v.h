@@ -107,6 +107,7 @@ public:
 		m_accel_vec_count(0),
 		m_accel_vec_data_idx(0),
 		m_accel_load_addr(0),
+		m_accel_clip_enable(1),
 		m_accel_busy_until(attotime::zero),
 		m_spinner_select(0),
 		m_spinner_sign(0),
@@ -283,23 +284,19 @@ private:
 
 	// z80gpu 3D accelerator model (segag80v_z80gpu_accel.h) -- bit-exact
 	// port of the real RTL's fixed-point algorithm (accel_rotate.v/
-	// accel_cull.v/accel_vecbuild.v), NOT the idealized CORDIC members
-	// above. main_portmap() maps ports 0xC9-0xD4 to the handlers below, in
-	// every machine config (no separate variant needed -- see
-	// main_portmap()'s own comment).
+	// accel_cull.v/accel_clip.v), NOT the idealized CORDIC members above.
+	// main_portmap() maps ports 0xC9-0xD5 to the handlers below, in every
+	// machine config (no separate variant needed -- see main_portmap()'s
+	// own comment).
 	//
-	// STAGE1_ROTATE+STAGE2_CULL+STAGE3_VECBUILD (accel_vecbuild.v's
-	// steel-thread output stage -- backface-cull-only, no per-part
-	// hidden-line removal yet) all run in z80gpu_run_frame(); STAGE3_EDGE
-	// (accel_clip.v, exact per-part hidden-line removal) doesn't exist in
-	// the RTL yet, only its simpler steel-thread predecessor -- swap
-	// build_vecbuf's call for that RTL's own C++ port once it lands, same
-	// signature. Real hardware has no port exposing m_accel_scratch_mem's
-	// intermediate contents (px8/py8/pz8/face_vis) directly -- by design,
-	// matching accel_top.v's protocol, which only ever hands back a
-	// finished vector_t chain -- so this model doesn't add one either;
-	// validating STAGE1/STAGE2/STAGE3 in isolation is what z80gpu's
-	// sim/model/check_against_rtl_refs.cpp is for.
+	// STAGE1_ROTATE+STAGE2_CULL+STAGE3_CLIP (accel_clip.v, exact per-part
+	// hidden-line removal) all run in z80gpu_run_frame(). Real hardware
+	// has no port exposing
+	// m_accel_scratch_mem's intermediate contents (px8/py8/pz8/face_vis)
+	// directly -- by design, matching accel_top.v's protocol, which only
+	// ever hands back a finished vector_t chain -- so this model doesn't
+	// add one either; validating STAGE1/STAGE2/STAGE3 in isolation is what
+	// z80gpu's sim/model/check_against_rtl_refs.cpp is for.
 	u8  m_accel_shape_mem[4096];   // mirrors accel_shape_mem.v's byte layout (see kShapes)
 	u8  m_accel_scratch_mem[4096]; // mirrors accel_scratch_mem.v's byte layout (grown from 2048 -- see that module's own header for why)
 	u8  m_accel_ctrl;              // read: bit0 BUSY, bit1 DONE, bit2 OVERFLOW; write: bit0 START, bit1 ABORT
@@ -308,6 +305,7 @@ private:
 	u16 m_accel_vec_count;
 	u16 m_accel_vec_data_idx;      // VEC_DATA burst-read auto-increment pointer
 	u16 m_accel_load_addr;         // LOAD_ADDR flat write pointer into m_accel_shape_mem
+	u8  m_accel_clip_enable;       // 0xD5 CLIP_ENABLE bit0, persistent -- sega-vector/3d's ENABLE_EDGE_OCCLUSION equivalent: 1 (default) = exact per-part occlusion, 0 = backface-cull-only. No ENABLE_FACE_CULL equivalent (accel_top.v's own port-map comment): STAGE2_CULL always runs.
 	// "busy until" machine-time threshold, set on START from an estimated
 	// STAGE1/STAGE2 cycle count (derived from accel_rotate.v/accel_cull.v's
 	// own per-vertex/per-face FSM cycle counts at clk_cpu's 50MHz/20ns) so
@@ -333,8 +331,11 @@ private:
 	// adjust_icount() call outside the normal M1/MREQ/IORQ cycle-cost path,
 	// so it isn't automatically covered by either timing model and has to be
 	// switched explicitly: the real Am25LS14A's serial-multiply stall
-	// (MULTIPLY_WAIT_STATES) isn't reproduced by the FPGA's xy_mult8x8.v,
-	// which computes the product combinationally/instantly instead.
+	// (MULTIPLY_WAIT_STATES) has nothing to reproduce on the FPGA side --
+	// the real FPGA has no hardware multiplier peripheral at ports 0xBD/
+	// 0xBE at all. This file emulates that multiplier in software for
+	// original ROMs regardless of FPGA timing (multiply_w/multiply_r
+	// above are unconditional on m_fpga_timing -- only this stall is).
 	bool m_fpga_timing;
 
 	// vector generator state machine (segag80v_v.cpp) -- runs as its own free-running,
@@ -450,6 +451,8 @@ private:
 	void z80gpu_load_addr_lo_w(u8 data);
 	void z80gpu_load_addr_hi_w(u8 data);
 	void z80gpu_load_data_w(u8 data);
+	void z80gpu_clip_enable_w(u8 data);
+	u8   z80gpu_clip_enable_r();
 	void z80gpu_run_frame();
 
 	void coin_count_w(u8 data);

@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <algorithm> // std::sort, build_vecbuf_clip's interval sort
 
 namespace z80gpu_accel {
 
@@ -237,20 +238,17 @@ inline const ShapeInfo kShapes[SHAPE_COUNT] = {
     { "legoman",    2342,    62,    38,    87,     6,     1,  2342,  2714,   2866,  2904,   3252,  3339 },
 };
 
-// Bit-exact port of accel_vecbuild.v's STAGE3_VECBUILD steel-thread output
-// stage: walks every edge, draws it if at least one adjacent face is
-// visible, no per-part hidden-line removal (see accel_vecbuild.v's own
-// header for why -- the eventual accel_clip.v swap-in changes only this
-// function's internals, not its signature or callers). `shape_mem` is the
-// full shape_mem byte image (only edges_off/face_colors_off/edge_colors_off
-// bytes are actually read); `face_vis` is STAGE2_CULL's output bitmap;
-// `px`/`py` are STAGE1_ROTATE's real-world-scale per-vertex output. Writes
-// up to edge_count*3 vector_t records (4 bytes each: color, magnitude,
-// angle_lo, angle_hi -- matching sega-vector/3d/vector_t's own layout) into
-// `dest` and returns the count actually written. Sequential/synchronous
-// here (no FSM state to model): accel_vecbuild.v's cycle-by-cycle stepping
-// only matters for real hardware timing, not for the bytes it eventually
-// produces, which is all a host-side model needs to match.
+// Bit-exact port of accel_vecbuild.v: walks every edge, draws it if at
+// least one adjacent face is visible, no per-part hidden-line removal
+// (backface-cull-only). Not the active path (see build_vecbuf_clip below);
+// kept as a reference model matching accel_vecbuild.v, which is itself
+// kept in the RTL for the same reason. `shape_mem` is the full shape_mem
+// byte image (only edges_off/face_colors_off/edge_colors_off bytes are
+// actually read); `face_vis` is STAGE2_CULL's output bitmap; `px`/`py` are
+// STAGE1_ROTATE's real-world-scale per-vertex output. Writes up to
+// edge_count*3 vector_t records (4 bytes each: color, magnitude, angle_lo,
+// angle_hi -- matching sega-vector/3d/vector_t's own layout) into `dest`
+// and returns the count actually written.
 inline uint16_t build_vecbuf(const uint8_t *shape_mem, const uint8_t *face_vis,
                               const int16_t *px, const int16_t *py,
                               uint16_t edges_off, uint16_t face_colors_off, uint16_t edge_colors_off,
@@ -309,6 +307,283 @@ inline uint16_t build_vecbuf(const uint8_t *shape_mem, const uint8_t *face_vis,
 
         penx = px_v1;
         peny = py_v1;
+    }
+
+    if (have_last) dest[last_idx * 4 + 0] |= COLOR_LAST;
+    return write_idx;
+}
+
+// Q15 fixed-point divider: quotient = trunc(|numerator|*32768/
+// |denominator|), sign-applied, saturating to the format's extremes
+// (32767/-32768) whenever the true magnitude would need an integer part
+// (|result|>=1.0) or denominator==0 -- bit-exact port of
+// z80gpu/src/accel_arith.v's fixed_div (see that module's own header for
+// why saturation, never wraparound, is the correct behavior here: a
+// saturated result still correctly fails the caller's lo<=hi containment
+// test, same as a mathematically exact huge value would).
+inline int16_t fixed_div_q15(int64_t numerator, int64_t denominator)
+{
+    bool result_sign = (numerator < 0) != (denominator < 0);
+    if (denominator == 0)
+        return result_sign ? (int16_t)-32768 : (int16_t)32767;
+    uint64_t abs_num = (numerator < 0) ? (uint64_t)(-numerator) : (uint64_t)numerator;
+    uint64_t abs_den = (denominator < 0) ? (uint64_t)(-denominator) : (uint64_t)denominator;
+    uint64_t quot = (abs_num << 15) / abs_den;
+    if (quot > 32767)
+        return result_sign ? (int16_t)-32768 : (int16_t)32767;
+    return result_sign ? (int16_t)(-(int32_t)quot) : (int16_t)quot;
+}
+
+// Silhouette half-plane clip of segment (p0x,p0y)-(p1x,p1y) against
+// convex polygon (poly_x,poly_y,nverts), in int8 rotated space -- bit-
+// exact port of accel_clip.v's S_SIL_SETUP/S_SIL_DIV/S_SIL_APPLY loop
+// (itself segag80v_cordic.h's own clip_to_polygon/clip_halfplane, redone
+// in Q15 fixed point instead of double). Returns false the moment the
+// [lo,hi] interval becomes empty (matches the RTL's early exit to
+// S_NEXT_FACE), same as segag80v_cordic.h's own clip_to_polygon.
+inline bool clip_to_polygon_q15(const int8_t *poly_x, const int8_t *poly_y, int nverts,
+                                 int8_t p0x, int8_t p0y, int8_t p1x, int8_t p1y,
+                                 int16_t &lo, int16_t &hi)
+{
+    for (int i = 0; i < nverts; i++) {
+        int ni = (i + 1 == nverts) ? 0 : i + 1;
+        int32_t edx = (int32_t)poly_x[ni] - poly_x[i];
+        int32_t edy = (int32_t)poly_y[ni] - poly_y[i];
+        int32_t A = edx * ((int32_t)p0y - poly_y[i]) - edy * ((int32_t)p0x - poly_x[i]);
+        int32_t B = edx * ((int32_t)p1y - p0y) - edy * ((int32_t)p1x - p0x);
+        if (B == 0) {
+            if (A >= 0) return false;
+            continue;
+        }
+        int16_t troot = fixed_div_q15(-(int64_t)A, (int64_t)B);
+        if (B > 0) { if (troot < hi) hi = troot; }
+        else       { if (troot > lo) lo = troot; }
+        if (lo > hi) return false;
+    }
+    return true;
+}
+
+// Raw (signed) triple-product depth value for candidate face (f0,f1,f2)
+// and query point q, all in int8 rotated space -- bit-exact port of
+// accel_clip.v's d_nx/d_ny/d_nz/dot0/dot1 combinational expressions
+// (equivalently, segag80v_cordic.h's own plane_dot, in fixed point).
+// dot<0 means q is behind the face's plane (occluded).
+inline int32_t plane_dot_q15(int8_t f0x, int8_t f0y, int8_t f0z,
+                              int8_t f1x, int8_t f1y, int8_t f1z,
+                              int8_t f2x, int8_t f2y, int8_t f2z,
+                              int8_t qx, int8_t qy, int8_t qz)
+{
+    int32_t ux = (int32_t)f1x - f0x, uy = (int32_t)f1y - f0y, uz = (int32_t)f1z - f0z;
+    int32_t vx = (int32_t)f2x - f0x, vy = (int32_t)f2y - f0y, vz = (int32_t)f2z - f0z;
+    int32_t nx = uy * vz - uz * vy;
+    int32_t ny = uz * vx - ux * vz;
+    int32_t nz = ux * vy - uy * vx;
+    int32_t dx = (int32_t)qx - f0x, dy = (int32_t)qy - f0y, dz = (int32_t)qz - f0z;
+    return nx * dx + ny * dy + nz * dz;
+}
+
+// Bit-exact port of accel_clip.v (STAGE3_CLIP, exact per-part hidden-line
+// removal) -- the active path (see z80gpu_run_frame, segag80v.cpp). Same
+// signature shape as build_vecbuf above, plus the extra shape metadata
+// (faces_off, part_face_end_off, part_count) accel_clip.v needs to find
+// candidate occluder faces; px8/py8/pz8 are STAGE1_ROTATE's own int8
+// rotated/shrunk per-vertex output (accel_scratch_mem's SCR_PX8/PY8/PZ8
+// arrays), same array indexing shape_mem's vertex indices already use.
+//
+// Occluded-interval bookkeeping is bounded to MAX_INTERVALS(8), NOT the
+// idealized segag80v_cordic.h's unbounded std::vector -- this function's
+// whole purpose is bit-for-bit hardware fidelity, including accel_clip.v's
+// own "9th+ distinct occluded interval on one edge is simply dropped"
+// policy (never expected to trigger for these 3 shapes' real part counts,
+// see accel_clip.v's own header) -- unlike that idealized model, which
+// deliberately has no such cap.
+inline uint16_t build_vecbuf_clip(const uint8_t *shape_mem, const uint8_t *face_vis,
+                                   const uint8_t *px8, const uint8_t *py8, const uint8_t *pz8,
+                                   const int16_t *px, const int16_t *py,
+                                   uint16_t edges_off, uint16_t faces_off,
+                                   uint16_t face_colors_off, uint16_t edge_colors_off,
+                                   uint16_t part_face_end_off,
+                                   uint8_t edge_count, uint8_t part_count,
+                                   uint16_t dest_max, uint8_t *dest)
+{
+    constexpr uint8_t  COLOR_CLEAR     = 0x00;
+    constexpr uint8_t  COLOR_LAST      = 0x80;
+    constexpr uint8_t  EDGE_COLOR_NONE = 0xFF;
+    constexpr int      MAX_INTERVALS   = 8;
+    constexpr int16_t  Q15_ZERO        = 0;
+    constexpr int16_t  Q15_ONE         = 32767; // ~1.0, see fixed_div_q15's own note on this Q15 boundary
+
+    auto fv = [&](uint8_t f) -> bool { return (face_vis[f >> 3] >> (f & 7)) & 1; };
+    auto i8 = [](const uint8_t *arr, uint8_t idx) -> int8_t { return (int8_t)arr[idx]; };
+
+    uint16_t write_idx = 0;
+    bool     have_last = false;
+    uint16_t last_idx  = 0;
+    int16_t  penx = 0, peny = 0;
+
+    auto emit = [&](uint8_t color, int16_t dx, int16_t dy) -> bool {
+        if (write_idx >= dest_max) return false;
+        RectToPolar r = rect_to_polar(dx, dy);
+        dest[write_idx * 4 + 0] = color;
+        dest[write_idx * 4 + 1] = r.magnitude;
+        dest[write_idx * 4 + 2] = (uint8_t)r.angle;
+        dest[write_idx * 4 + 3] = (uint8_t)(r.angle >> 8);
+        write_idx++;
+        return true;
+    };
+
+    for (uint8_t i = 0; i < edge_count; i++) {
+        uint16_t ea = edges_off + i * 4;
+        uint8_t v0 = shape_mem[ea + 0], v1 = shape_mem[ea + 1];
+        uint8_t faceA = shape_mem[ea + 2], faceB = shape_mem[ea + 3];
+
+        bool fv_a = fv(faceA), fv_b = fv(faceB);
+        if (!fv_a && !fv_b) continue;
+
+        uint8_t chosen_color   = shape_mem[face_colors_off + (fv_a ? faceA : faceB)];
+        uint8_t edge_color_ovr = shape_mem[edge_colors_off + i];
+
+        int8_t v0x8 = i8(px8, v0), v0y8 = i8(py8, v0), v0z8 = i8(pz8, v0);
+        int8_t v1x8 = i8(px8, v1), v1y8 = i8(py8, v1), v1z8 = i8(pz8, v1);
+        int16_t px_v0 = px[v0], py_v0 = py[v0], px_v1 = px[v1], py_v1 = py[v1];
+
+        // which part owns faceA/faceB -- found by range membership against
+        // each part's own [start,end) as we consider skipping it (same as
+        // accel_clip.v's S_PART_SKIP_CHECK; no face_part[] table).
+        int16_t occ_lo[MAX_INTERVALS], occ_hi[MAX_INTERVALS];
+        int     occ_count = 0;
+
+        uint8_t part_start = 0;
+        for (uint8_t p = 0; p < part_count; p++) {
+            uint8_t part_end = shape_mem[part_face_end_off + p];
+            bool owns_edge_face = (faceA >= part_start && faceA < part_end) ||
+                                   (faceB >= part_start && faceB < part_end);
+            if (!owns_edge_face) {
+                for (uint8_t j = part_start; j < part_end; j++) {
+                    if (!fv(j)) continue;
+
+                    uint16_t fa = faces_off + j * 4;
+                    uint8_t cf_v[4] = { shape_mem[fa+0], shape_mem[fa+1], shape_mem[fa+2], shape_mem[fa+3] };
+                    bool is_quad = (cf_v[3] != cf_v[2]);
+                    int  nverts  = is_quad ? 4 : 3;
+
+                    int8_t cfx8[4], cfy8[4], cfz8[3];
+                    for (int k = 0; k < nverts; k++) {
+                        cfx8[k] = i8(px8, cf_v[k]);
+                        cfy8[k] = i8(py8, cf_v[k]);
+                    }
+                    for (int k = 0; k < 3; k++) cfz8[k] = i8(pz8, cf_v[k]);
+
+                    int16_t lo = Q15_ZERO, hi = Q15_ONE;
+                    if (!clip_to_polygon_q15(cfx8, cfy8, nverts, v0x8, v0y8, v1x8, v1y8, lo, hi))
+                        continue;
+
+                    int32_t dot0 = plane_dot_q15(cfx8[0],cfy8[0],cfz8[0], cfx8[1],cfy8[1],cfz8[1],
+                                                  cfx8[2],cfy8[2],cfz8[2], v0x8,v0y8,v0z8);
+                    int32_t dot1 = plane_dot_q15(cfx8[0],cfy8[0],cfz8[0], cfx8[1],cfy8[1],cfz8[1],
+                                                  cfx8[2],cfy8[2],cfz8[2], v1x8,v1y8,v1z8);
+                    int32_t A = dot0, B = dot1 - dot0;
+                    if (B == 0) {
+                        if (A >= 0) continue; // constant, in front -- no occlusion from this face
+                        // else: constant, behind -- whole [lo,hi] occluded, fall through to record
+                    } else {
+                        int16_t troot = fixed_div_q15(-(int64_t)A, (int64_t)B);
+                        if (B > 0) { if (troot < hi) hi = troot; }
+                        else       { if (troot > lo) lo = troot; }
+                        if (lo > hi) continue;
+                    }
+
+                    if (hi > lo && occ_count < MAX_INTERVALS) {
+                        occ_lo[occ_count] = lo;
+                        occ_hi[occ_count] = hi;
+                        occ_count++;
+                    }
+                }
+            }
+            part_start = part_end;
+        }
+
+        // sort + merge (matches accel_clip.v's S_SORT/S_MERGE; std::sort's
+        // instability on tied `lo` values doesn't matter here -- merging
+        // unions overlapping intervals regardless of which tied entry
+        // comes first, see accel_clip.v's own header on this)
+        {
+            struct IV { int16_t lo, hi; };
+            IV iv[MAX_INTERVALS];
+            for (int k = 0; k < occ_count; k++) { iv[k].lo = occ_lo[k]; iv[k].hi = occ_hi[k]; }
+            std::sort(iv, iv + occ_count, [](const IV &a, const IV &b) { return a.lo < b.lo; });
+            for (int k = 0; k < occ_count; k++) { occ_lo[k] = iv[k].lo; occ_hi[k] = iv[k].hi; }
+        }
+        int16_t merged_lo[MAX_INTERVALS], merged_hi[MAX_INTERVALS];
+        int     merged_count = 0;
+        if (occ_count > 0) {
+            int16_t cur_lo = occ_lo[0], cur_hi = occ_hi[0];
+            for (int k = 1; k < occ_count; k++) {
+                if (occ_lo[k] <= cur_hi) {
+                    if (occ_hi[k] > cur_hi) cur_hi = occ_hi[k];
+                } else {
+                    merged_lo[merged_count] = cur_lo; merged_hi[merged_count] = cur_hi; merged_count++;
+                    cur_lo = occ_lo[k]; cur_hi = occ_hi[k];
+                }
+            }
+            merged_lo[merged_count] = cur_lo; merged_hi[merged_count] = cur_hi; merged_count++;
+        }
+
+        // complement -> visible sub-intervals (matches S_COMPLEMENT)
+        int16_t vis_lo[MAX_INTERVALS + 1], vis_hi[MAX_INTERVALS + 1];
+        int     vis_count = 0;
+        int16_t cursor = Q15_ZERO;
+        for (int k = 0; k < merged_count; k++) {
+            if (merged_lo[k] > cursor) {
+                vis_lo[vis_count] = cursor;
+                vis_hi[vis_count] = merged_lo[k];
+                vis_count++;
+            }
+            if (merged_hi[k] > cursor) cursor = merged_hi[k];
+        }
+        if (cursor < Q15_ONE) {
+            vis_lo[vis_count] = cursor;
+            vis_hi[vis_count] = Q15_ONE;
+            vis_count++;
+        }
+
+        // emit each visible sub-segment (matches S_EMIT_T0..S_EMIT_NEXT):
+        // t=Q15_ONE is only an approximation of 1.0 (32768 doesn't fit
+        // signed 16-bit), so a visible bound that's genuinely the edge's
+        // true endpoint uses the exact px_v1/py_v1 rather than a rounded
+        // interpolation -- otherwise consecutive edges sharing a vertex
+        // would spuriously need a pen-up move between them (see
+        // accel_clip.v's own header on this, found via its testbench).
+        auto lerp16 = [](int16_t v0, int16_t v1, int16_t t) -> int16_t {
+            return (int16_t)(v0 + (int16_t)(((int32_t)t * (int32_t)(v1 - v0)) >> 15));
+        };
+        bool overflowed = false;
+        for (int s = 0; s < vis_count && !overflowed; s++) {
+            int16_t seg_x0 = (vis_lo[s] == Q15_ONE) ? px_v1 : lerp16(px_v0, px_v1, vis_lo[s]);
+            int16_t seg_y0 = (vis_lo[s] == Q15_ONE) ? py_v1 : lerp16(py_v0, py_v1, vis_lo[s]);
+            int16_t seg_x1 = (vis_hi[s] == Q15_ONE) ? px_v1 : lerp16(px_v0, px_v1, vis_hi[s]);
+            int16_t seg_y1 = (vis_hi[s] == Q15_ONE) ? py_v1 : lerp16(py_v0, py_v1, vis_hi[s]);
+
+            if (seg_x0 != penx || seg_y0 != peny) {
+                int16_t dx = (int16_t)(seg_x0 - penx), dy = (int16_t)(seg_y0 - peny);
+                if (dx > 160 || dx < -160 || dy > 160 || dy < -160) {
+                    int16_t hop1_dx = dx >> 1, hop1_dy = dy >> 1;
+                    int16_t hop2_dx = (int16_t)(dx - hop1_dx), hop2_dy = (int16_t)(dy - hop1_dy);
+                    if (!emit(COLOR_CLEAR, hop1_dx, hop1_dy)) { overflowed = true; break; }
+                    if (!emit(COLOR_CLEAR, hop2_dx, hop2_dy)) { overflowed = true; break; }
+                } else {
+                    if (!emit(COLOR_CLEAR, dx, dy)) { overflowed = true; break; }
+                }
+            }
+
+            uint8_t drawn_color = (edge_color_ovr != EDGE_COLOR_NONE) ? edge_color_ovr : chosen_color;
+            last_idx  = write_idx;
+            have_last = true;
+            if (!emit(drawn_color, (int16_t)(seg_x1 - seg_x0), (int16_t)(seg_y1 - seg_y0))) { overflowed = true; break; }
+            penx = seg_x1;
+            peny = seg_y1;
+        }
+        if (overflowed) break;
     }
 
     if (have_last) dest[last_idx * 4 + 0] |= COLOR_LAST;
