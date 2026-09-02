@@ -1,0 +1,324 @@
+// Verilated -*- C++ -*-
+// DESCRIPTION: Verilator output: Design internal header
+// See Vaccel_top.h for the primary calling header
+
+#ifndef VERILATED_VACCEL_TOP___024ROOT_H_
+#define VERILATED_VACCEL_TOP___024ROOT_H_  // guard
+
+#include "verilated.h"
+class Vaccel_top_sincos_rom;
+
+
+class Vaccel_top__Syms;
+
+class alignas(VL_CACHE_LINE_BYTES) Vaccel_top___024root final {
+  public:
+    // CELLS
+    Vaccel_top_sincos_rom* __PVT__accel_top__DOT__u_rotate__DOT__sc_yaw;
+    Vaccel_top_sincos_rom* __PVT__accel_top__DOT__u_rotate__DOT__sc_pitch;
+
+    // DESIGN SPECIFIC STATE
+    // Anonymous structures to workaround compiler member-count bugs
+    struct {
+        VL_IN8(clk,0,0);
+        VL_IN8(rst_ni,0,0);
+        VL_IN8(addr,7,0);
+        VL_IN8(iorq_n,0,0);
+        VL_IN8(rd_n,0,0);
+        VL_IN8(wr_n,0,0);
+        VL_IN8(data_in,7,0);
+        VL_OUT8(data_out,7,0);
+        VL_OUT8(sel,0,0);
+        VL_OUT8(shape_load_data,7,0);
+        VL_OUT8(shape_load_we,0,0);
+        CData/*0:0*/ accel_top__DOT__io_write;
+        CData/*0:0*/ accel_top__DOT__io_read;
+        CData/*0:0*/ accel_top__DOT__write_ctrl;
+        CData/*0:0*/ accel_top__DOT__write_clip_enable;
+        CData/*0:0*/ accel_top__DOT__read_ctrl;
+        CData/*0:0*/ accel_top__DOT__read_vec_count_lo;
+        CData/*0:0*/ accel_top__DOT__read_vec_count_hi;
+        CData/*0:0*/ accel_top__DOT__read_vec_data;
+        CData/*0:0*/ accel_top__DOT__read_clip_enable;
+        CData/*0:0*/ accel_top__DOT__busy;
+        CData/*0:0*/ accel_top__DOT__done_latch;
+        CData/*7:0*/ accel_top__DOT__desc_vertex_count_reg;
+        CData/*7:0*/ accel_top__DOT__desc_face_count_reg;
+        CData/*7:0*/ accel_top__DOT__desc_edge_count_reg;
+        CData/*7:0*/ accel_top__DOT__desc_part_count_reg;
+        CData/*2:0*/ accel_top__DOT__desc_coord_shift_reg;
+        CData/*7:0*/ accel_top__DOT__vec_data_latch;
+        CData/*0:0*/ accel_top__DOT__prev_read_vec_data;
+        CData/*0:0*/ accel_top__DOT__clip_enable_reg;
+        CData/*0:0*/ accel_top__DOT__hw_pen_correct_reg;
+        CData/*7:0*/ accel_top__DOT__vecbuf_rdata;
+        CData/*0:0*/ accel_top__DOT__start_pulse;
+        CData/*0:0*/ accel_top__DOT__rotate_start;
+        CData/*0:0*/ accel_top__DOT__cull_start;
+        CData/*0:0*/ accel_top__DOT__clip_start;
+        CData/*0:0*/ accel_top__DOT__rotate_done;
+        CData/*0:0*/ accel_top__DOT__cull_done;
+        CData/*0:0*/ accel_top__DOT__clip_done;
+        CData/*7:0*/ accel_top__DOT__rotate_scr_wdata;
+        CData/*0:0*/ accel_top__DOT__rotate_scr_we;
+        CData/*7:0*/ accel_top__DOT__cull_scr_wdata;
+        CData/*0:0*/ accel_top__DOT__cull_scr_we;
+        CData/*7:0*/ accel_top__DOT__clip_scr_wdata;
+        CData/*0:0*/ accel_top__DOT__clip_scr_we;
+        CData/*7:0*/ accel_top__DOT__clip_effective_part_count;
+        CData/*1:0*/ accel_top__DOT__active_stage;
+        CData/*2:0*/ accel_top__DOT__mstate;
+        CData/*7:0*/ accel_top__DOT__shape_mem_rd_data;
+        CData/*7:0*/ accel_top__DOT__scratch_a_rdata;
+        CData/*5:0*/ accel_top__DOT__u_clip__DOT__state;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__i;
+        CData/*2:0*/ accel_top__DOT__u_clip__DOT__esub;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v0;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v1;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__faceA;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__faceB;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__fv_a;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__fv_b;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__chosen_color;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__edge_color_ovr;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__colsub;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__fvsub;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v0x8;
+    };
+    struct {
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v0y8;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v0z8;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v1x8;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v1y8;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__v1z8;
+        CData/*2:0*/ accel_top__DOT__u_clip__DOT__ev8sub;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__ev16sub;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__part_p;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__part_start;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__part_end_v;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__pfesub;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__j;
+        CData/*2:0*/ accel_top__DOT__u_clip__DOT__cfvsub;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__is_quad;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__nverts;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__cfcrdsub;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__pe;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__div_start;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__div_done;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__div_tighten_hi;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__occ_count;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__si;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__sj;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__vis_count;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__merge_wr;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__vseg;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__hop_pending;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__rtp_start;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__rtp_done;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__rtp_magnitude;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__rtp_mag_latched;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__last_color;
+        CData/*1:0*/ accel_top__DOT__u_clip__DOT__wrsub;
+        CData/*1:0*/ accel_top__DOT__u_clip__DOT__ev8_which;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__is_last_poly_edge;
+        CData/*1:0*/ accel_top__DOT__u_clip__DOT__pe_next;
+        CData/*1:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__state;
+        CData/*5:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__iter;
+        CData/*0:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__result_sign;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT____VlemCall_1__atan_lut;
+        CData/*7:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT____VlemCall_0__atan_lut;
+        CData/*2:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__state;
+        CData/*3:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__iter;
+        CData/*3:0*/ accel_top__DOT__u_rotate__DOT__state;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__vidx;
+        CData/*2:0*/ accel_top__DOT__u_rotate__DOT__byte_idx;
+        CData/*1:0*/ accel_top__DOT__u_rotate__DOT__wr_idx4;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__xs;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__ys;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__zs;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__x1;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__z1;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__z2;
+        CData/*7:0*/ accel_top__DOT__u_rotate__DOT__y1;
+        CData/*0:0*/ accel_top__DOT__u_rotate__DOT__scale_div_start;
+        CData/*0:0*/ accel_top__DOT__u_rotate__DOT__scale_div_done;
+        CData/*1:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__state;
+        CData/*5:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__iter;
+        CData/*0:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__result_sign;
+        CData/*3:0*/ accel_top__DOT__u_cull__DOT__state;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__f;
+        CData/*1:0*/ accel_top__DOT__u_cull__DOT__vsub;
+        CData/*2:0*/ accel_top__DOT__u_cull__DOT__csub;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__ax;
+    };
+    struct {
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__ay;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__bx;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__by;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__cx;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__cy;
+        CData/*7:0*/ accel_top__DOT__u_cull__DOT__vis_byte;
+        CData/*1:0*/ __Vdly__accel_top__DOT__active_stage;
+        CData/*5:0*/ __Vdly__accel_top__DOT__u_clip__DOT__state;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_clip__DOT__i;
+        CData/*2:0*/ __Vdly__accel_top__DOT__u_clip__DOT__esub;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_clip__DOT__part_p;
+        CData/*0:0*/ __Vdly__accel_top__DOT__u_clip__DOT__pfesub;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_clip__DOT__j;
+        CData/*2:0*/ __Vdly__accel_top__DOT__u_clip__DOT__cfvsub;
+        CData/*0:0*/ __Vdly__accel_top__DOT__u_clip__DOT__colsub;
+        CData/*0:0*/ __Vdly__accel_top__DOT__u_clip__DOT__fv_a;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_clip__DOT__faceA;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_clip__DOT__faceB;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_rotate__DOT__vidx;
+        CData/*2:0*/ __Vdly__accel_top__DOT__u_rotate__DOT__byte_idx;
+        CData/*7:0*/ __Vdly__accel_top__DOT__u_cull__DOT__f;
+        CData/*1:0*/ __Vdly__accel_top__DOT__u_cull__DOT__vsub;
+        CData/*7:0*/ __VdlyVal__accel_top__DOT__u_scratch_mem__DOT__mem__v0;
+        CData/*0:0*/ __VdlySet__accel_top__DOT__u_scratch_mem__DOT__mem__v0;
+        CData/*7:0*/ __VdlyVal__accel_top__DOT__u_shape_mem__DOT__mem__v0;
+        CData/*0:0*/ __VdlySet__accel_top__DOT__u_shape_mem__DOT__mem__v0;
+        CData/*0:0*/ __VstlFirstIteration;
+        CData/*0:0*/ __VstlPhaseResult;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__clk__0;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__rst_ni__0;
+        CData/*7:0*/ __Vtrigprevexpr___TOP__addr__0;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__iorq_n__0;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__rd_n__0;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__wr_n__0;
+        CData/*7:0*/ __Vtrigprevexpr___TOP__data_in__0;
+        CData/*0:0*/ __VicoDidInit;
+        CData/*0:0*/ __VicoPhaseResult;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__clk__1;
+        CData/*0:0*/ __Vtrigprevexpr___TOP__rst_ni__1;
+        CData/*0:0*/ __VactPhaseResult;
+        CData/*0:0*/ __VnbaPhaseResult;
+        VL_OUT16(shape_load_addr,11,0);
+        SData/*11:0*/ accel_top__DOT__desc_base_reg;
+        SData/*9:0*/ accel_top__DOT__yaw_reg;
+        SData/*9:0*/ accel_top__DOT__pitch_reg;
+        SData/*15:0*/ accel_top__DOT__distance_reg;
+        SData/*15:0*/ accel_top__DOT__vec_count_reg;
+        SData/*15:0*/ accel_top__DOT__load_addr_reg;
+        SData/*15:0*/ accel_top__DOT__vec_data_idx;
+        SData/*11:0*/ accel_top__DOT__faces_base;
+        SData/*11:0*/ accel_top__DOT__face_colors_base;
+        SData/*11:0*/ accel_top__DOT__edges_base;
+        SData/*11:0*/ accel_top__DOT__edge_colors_base;
+        SData/*15:0*/ accel_top__DOT__clip_vec_count;
+        SData/*11:0*/ accel_top__DOT__rotate_scr_addr;
+        SData/*11:0*/ accel_top__DOT__scratch_a_addr;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__px_v0;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__py_v0;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__px_v1;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__py_v1;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__cur_lo;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__cur_hi;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__div_q;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__tmp_lo;
+    };
+    struct {
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__tmp_hi;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__new_lo;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__new_hi;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__cursor;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__seg_x0;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__seg_y0;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__seg_x1;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__seg_y1;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__penx;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__peny;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__rtp_dx;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__rtp_dy;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__hop2_dx;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__hop2_dy;
+        SData/*9:0*/ accel_top__DOT__u_clip__DOT__rtp_angle;
+        SData/*9:0*/ accel_top__DOT__u_clip__DOT__rtp_angle_latched;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__hw_dx;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__hw_dy;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__write_idx;
+        SData/*11:0*/ accel_top__DOT__u_clip__DOT__last_write_addr;
+        SData/*11:0*/ accel_top__DOT__u_clip__DOT__write_addr_reg;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__interp_t;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__interp_delta;
+        SData/*15:0*/ accel_top__DOT__u_clip__DOT__interp_result;
+        SData/*10:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__acc_angle;
+        SData/*9:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__angle_offset;
+        SData/*15:0*/ accel_top__DOT__u_rotate__DOT__scale_div_quotient;
+        SData/*15:0*/ accel_top__DOT__u_rotate__DOT__scale_q15;
+        SData/*15:0*/ accel_top__DOT__u_rotate__DOT__px_final;
+        SData/*15:0*/ accel_top__DOT__u_rotate__DOT__py_final;
+        SData/*11:0*/ accel_top__DOT__u_rotate__DOT__vidx2;
+        SData/*8:0*/ accel_top__DOT__u_cull__DOT__mul_a;
+        SData/*8:0*/ accel_top__DOT__u_cull__DOT__mul_b;
+        SData/*11:0*/ accel_top__DOT__u_cull__DOT__write_addr_reg;
+        SData/*8:0*/ __VdfgRegularize_hebeb780c_0_38;
+        SData/*8:0*/ __VdfgRegularize_hebeb780c_0_39;
+        SData/*11:0*/ __Vdly__accel_top__DOT__desc_base_reg;
+        SData/*15:0*/ __Vdly__accel_top__DOT__vec_data_idx;
+        SData/*11:0*/ __VdlyDim0__accel_top__DOT__u_scratch_mem__DOT__mem__v0;
+        SData/*11:0*/ __VdlyDim0__accel_top__DOT__u_shape_mem__DOT__mem__v0;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__div_num;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__div_den;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__sil_A;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__sil_B;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__dot0;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__dot1;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__abs_denom;
+        IData/*31:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__rem;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__x;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__y;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__y_shifted;
+        IData/*23:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__x_shifted;
+        IData/*31:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__abs_denom;
+        IData/*31:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__rem;
+        IData/*17:0*/ accel_top__DOT__u_cull__DOT__mul_p;
+        IData/*17:0*/ accel_top__DOT__u_cull__DOT__prod0;
+        IData/*19:0*/ __VdfgRegularize_hebeb780c_0_11;
+        IData/*19:0*/ __VdfgRegularize_hebeb780c_0_13;
+        IData/*19:0*/ __VdfgRegularize_hebeb780c_0_17;
+        IData/*19:0*/ __VdfgRegularize_hebeb780c_0_19;
+        IData/*31:0*/ __VactIterCount;
+        QData/*46:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__quot;
+        QData/*32:0*/ accel_top__DOT__u_clip__DOT__u_div__DOT__shifted_rem;
+        QData/*41:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__mag_wide;
+    };
+    struct {
+        QData/*41:0*/ accel_top__DOT__u_clip__DOT__u_rtp__DOT__mag_shifted;
+        QData/*46:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__quot;
+        QData/*32:0*/ accel_top__DOT__u_rotate__DOT__u_scale_div__DOT__shifted_rem;
+        VlUnpacked<CData/*7:0*/, 8> accel_top__DOT__u_clip__DOT__ev16_bytes;
+        VlUnpacked<CData/*7:0*/, 4> accel_top__DOT__u_clip__DOT__cf_v;
+        VlUnpacked<CData/*7:0*/, 4> accel_top__DOT__u_clip__DOT__cfx8;
+        VlUnpacked<CData/*7:0*/, 4> accel_top__DOT__u_clip__DOT__cfy8;
+        VlUnpacked<CData/*7:0*/, 3> accel_top__DOT__u_clip__DOT__cfz8;
+        VlUnpacked<SData/*15:0*/, 8> accel_top__DOT__u_clip__DOT__occ_lo;
+        VlUnpacked<SData/*15:0*/, 8> accel_top__DOT__u_clip__DOT__occ_hi;
+        VlUnpacked<SData/*15:0*/, 9> accel_top__DOT__u_clip__DOT__vis_lo;
+        VlUnpacked<SData/*15:0*/, 9> accel_top__DOT__u_clip__DOT__vis_hi;
+        VlUnpacked<CData/*7:0*/, 512> accel_top__DOT__u_clip__DOT__u_hwdelta__DOT__rom;
+        VlUnpacked<CData/*7:0*/, 6> accel_top__DOT__u_rotate__DOT__vbytes;
+        VlUnpacked<CData/*7:0*/, 3> accel_top__DOT__u_cull__DOT__fv;
+        VlUnpacked<CData/*7:0*/, 4096> accel_top__DOT__u_scratch_mem__DOT__mem;
+        VlUnpacked<CData/*7:0*/, 4096> accel_top__DOT__u_shape_mem__DOT__mem;
+        VlUnpacked<QData/*63:0*/, 1> __VstlTriggered;
+        VlUnpacked<QData/*63:0*/, 2> __VicoTriggered;
+        VlUnpacked<QData/*63:0*/, 1> __VactTriggered;
+        VlUnpacked<QData/*63:0*/, 1> __VnbaTriggered;
+    };
+
+    // INTERNAL VARIABLES
+    Vaccel_top__Syms* vlSymsp;
+    const char* vlNamep;
+
+    // CONSTRUCTORS
+    Vaccel_top___024root(Vaccel_top__Syms* symsp, const char* namep);
+    ~Vaccel_top___024root();
+    VL_UNCOPYABLE(Vaccel_top___024root);
+
+    // INTERNAL METHODS
+    void __Vconfigure(bool first);
+};
+
+
+#endif  // guard

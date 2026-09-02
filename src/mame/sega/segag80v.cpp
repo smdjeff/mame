@@ -137,6 +137,9 @@
 #include "emu.h"
 #include "segag80.h"
 #include "segag80v.h"
+#include "z80gpu_verilated/z80gpu_verilated_impl.h"
+
+segag80v_state::~segag80v_state() = default;
 #include "segag80_m.h"
 
 #include "cpu/z80/z80.h"
@@ -146,7 +149,6 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
-#include <chrono>
 
 
 // Unsure whether this should be 2 or 3. It depends on how many rising clock
@@ -226,18 +228,10 @@ void segag80v_state::service_switch_w(int state)
 void segag80v_state::machine_start()
 {
 	m_scrambled_write_pc = 0xffff;
+	m_accel = std::make_unique<z80gpu_verilated_accel>();
 
 	save_item(NAME(m_mult_data));
 	save_item(NAME(m_mult_result));
-	save_item(NAME(m_polar_windex));
-	save_item(NAME(m_polar_data));
-	save_item(NAME(m_polar_vector));
-	save_item(NAME(m_rotate_windex));
-	save_item(NAME(m_rotate_data));
-	save_item(NAME(m_rotate_vector));
-	save_item(NAME(m_cross_windex));
-	save_item(NAME(m_cross_data));
-	save_item(NAME(m_cross_result));
 	save_item(NAME(m_spinner_select));
 	save_item(NAME(m_spinner_sign));
 	save_item(NAME(m_spinner_count));
@@ -246,15 +240,9 @@ void segag80v_state::machine_start()
 	save_item(NAME(m_coin_last_state));
 	save_item(NAME(m_edgint_ff_state));
 
-	save_item(NAME(m_accel_shape_mem));
-	save_item(NAME(m_accel_scratch_mem));
-	save_item(NAME(m_accel_ctrl));
-	save_item(NAME(m_accel_shape_select));
-	save_item(NAME(m_accel_yaw));
-	save_item(NAME(m_accel_pitch));
-	save_item(NAME(m_accel_vec_count));
-	save_item(NAME(m_accel_vec_data_idx));
-	save_item(NAME(m_accel_load_addr));
+	// KNOWN LIMITATION: m_accel's Verilated state isn't save_item-
+	// reflectable, so save states don't capture shape_mem or VEC_DATA's
+	// read pointer.
 	save_item(NAME(m_accel_busy_until));
 
 	save_item(NAME(m_vg_phase));
@@ -527,119 +515,18 @@ u8 segag80v_state::vector_pc_msb_r()
 	return (m_vector_pc >> 8) & 0x0f;
 }
 
-// The idealized CORDIC coprocessor (ports 0xC0-0xC8, rect_to_polar_w through
-// cordic_hidden_line_w) now lives in segag80v_cordic.h -- see that file's
-// own header comment.
-#include "segag80v_cordic.h"
-
-
 /*************************************
  *
- *  z80gpu 3D accelerator model (bit-exact, not idealized -- see
- *  segag80v_z80gpu_accel.h and m_accel_* members' own comments)
+ *  z80gpu 3D accelerator -- the real RTL, run via Verilator. Every handler
+ *  below is a direct pass-through onto accel_top.v's real Z80 bus pins;
+ *  none of its state is mirrored here.
  *
  *************************************/
 
-namespace {
-constexpr u16 ACCEL_SCR_PX_BASE       = 0;
-constexpr u16 ACCEL_SCR_PY_BASE       = 220;
-constexpr u16 ACCEL_SCR_PX8_BASE      = 440;
-constexpr u16 ACCEL_SCR_PY8_BASE      = 550;
-constexpr u16 ACCEL_SCR_PZ8_BASE      = 660;
-constexpr u16 ACCEL_SCR_FACE_VIS_BASE = 770;
-constexpr u16 ACCEL_SCR_VECBUF_BASE   = 782; // matches accel_top.v's SCR_VECBUF_BASE exactly
-}
-
-// Runs STAGE1_ROTATE then STAGE2_CULL synchronously, writing results into
-// m_accel_scratch_mem at exactly accel_scratch_mem.v's fixed offsets.
-// Called from z80gpu_ctrl_w on START -- see that function's own comment
-// for why the results land in memory immediately but DONE isn't visible
-// to a polling Z80 until an estimated real-hardware delay has elapsed.
-void segag80v_state::z80gpu_run_frame()
-{
-	if (m_accel_shape_select >= z80gpu_accel::SHAPE_COUNT)
-		return;
-	const z80gpu_accel::ShapeInfo &shape = z80gpu_accel::kShapes[m_accel_shape_select];
-
-	// STAGE1_ROTATE
-	for (unsigned i = 0; i < shape.vertex_count; i++) {
-		u16 va = shape.verts_off + i * 6;
-		int16_t vx = (int16_t)(m_accel_shape_mem[va + 0] | (m_accel_shape_mem[va + 1] << 8));
-		int16_t vy = (int16_t)(m_accel_shape_mem[va + 2] | (m_accel_shape_mem[va + 3] << 8));
-		int16_t vz = (int16_t)(m_accel_shape_mem[va + 4] | (m_accel_shape_mem[va + 5] << 8));
-
-		z80gpu_accel::RotatedVertex rv = z80gpu_accel::rotate_project(vx, vy, vz, m_accel_yaw, m_accel_pitch, shape.coord_shift);
-
-		m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 0] = (u8)rv.px;
-		m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 1] = (u8)((u16)rv.px >> 8);
-		m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 0] = (u8)rv.py;
-		m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 1] = (u8)((u16)rv.py >> 8);
-		m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + i] = (u8)rv.px8;
-		m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + i] = (u8)rv.py8;
-		m_accel_scratch_mem[ACCEL_SCR_PZ8_BASE + i] = (u8)rv.pz8;
-	}
-
-	// STAGE2_CULL
-	for (unsigned f = 0; f < shape.face_count; f++) {
-		u16 fa = shape.faces_off + f * 4;
-		u8 v0 = m_accel_shape_mem[fa + 0], v1 = m_accel_shape_mem[fa + 1], v2 = m_accel_shape_mem[fa + 2];
-		int8_t ax = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v0], ay = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v0];
-		int8_t bx = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v1], by = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v1];
-		int8_t cx = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PX8_BASE + v2], cy = (int8_t)m_accel_scratch_mem[ACCEL_SCR_PY8_BASE + v2];
-
-		u16 byte_off = ACCEL_SCR_FACE_VIS_BASE + (f >> 3);
-		if ((f & 7) == 0)
-			m_accel_scratch_mem[byte_off] = 0; // fresh group -- see accel_cull.v's own comment on why no separate clear pass is needed
-		if (z80gpu_accel::cross_negative(ax, ay, bx, by, cx, cy))
-			m_accel_scratch_mem[byte_off] |= (1 << (f & 7));
-	}
-
-	// STAGE3_CLIP: exact hidden-line removal (accel_clip.v). A single edge
-	// can split into more than a fixed 2-3 records, so there's no static
-	// edge_count-based bound to check up front -- the dest_max passed to
-	// build_vecbuf_clip below (matching accel_top.v's own CLIP_DEST_MAX)
-	// is the real guard, mirroring the RTL's own clamp exactly
-	// (accel_clip.v stops writing, not just stops counting, past dest_max).
-	constexpr u16 ACCEL_CLIP_DEST_MAX = (sizeof(m_accel_scratch_mem) - ACCEL_SCR_VECBUF_BASE) / 4; // 828, matches accel_top.v's CLIP_DEST_MAX
-
-	// 0xD5 CLIP_ENABLE gates the part loop the same way accel_top.v's own
-	// clip_effective_part_count does: forcing part_count to 0 reuses
-	// build_vecbuf_clip's own "no occluders possible" path (same as
-	// cube_shape's real part_count=0).
-	u8 effective_part_count = m_accel_clip_enable ? shape.part_count : 0;
-
-	// Rebuild px/py as contiguous int16_t arrays for build_vecbuf_clip:
-	// m_accel_scratch_mem stores them as separate LE byte pairs
-	// (STAGE1_ROTATE above), not a portable int16_t[] to reinterpret
-	// directly.
-	int16_t vpx[128], vpy[128];
-	for (unsigned i = 0; i < shape.vertex_count; i++) {
-		vpx[i] = (int16_t)(m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 0] | (m_accel_scratch_mem[ACCEL_SCR_PX_BASE + i * 2 + 1] << 8));
-		vpy[i] = (int16_t)(m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 0] | (m_accel_scratch_mem[ACCEL_SCR_PY_BASE + i * 2 + 1] << 8));
-	}
-	// Diagnostic only: real host-CPU wall-clock time build_vecbuf_clip
-	// itself takes to compute one frame, separate from m_accel_busy_until's
-	// estimate of what a Z80 polling loop would see on real hardware --
-	// this measures whether the C++ model itself is slow (a real
-	// performance bug in this function), not whatever attotime the game
-	// then waits out afterward.
-	auto clip_t0 = std::chrono::steady_clock::now();
-	m_accel_vec_count = z80gpu_accel::build_vecbuf_clip(
-		m_accel_shape_mem, &m_accel_scratch_mem[ACCEL_SCR_FACE_VIS_BASE],
-		&m_accel_scratch_mem[ACCEL_SCR_PX8_BASE], &m_accel_scratch_mem[ACCEL_SCR_PY8_BASE], &m_accel_scratch_mem[ACCEL_SCR_PZ8_BASE],
-		vpx, vpy,
-		shape.edges_off, shape.faces_off, shape.face_colors_off, shape.edge_colors_off,
-		shape.part_face_end_off, shape.edge_count, effective_part_count,
-		ACCEL_CLIP_DEST_MAX, &m_accel_scratch_mem[ACCEL_SCR_VECBUF_BASE]);
-	auto clip_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - clip_t0).count();
-	printf("%s: build_vecbuf_clip: shape=%s edges=%u parts=%u vec_count=%u host_time=%lldus\n",
-			machine().time().as_string(), shape.name, shape.edge_count, effective_part_count,
-			m_accel_vec_count, (long long)clip_us);
-}
-
 void segag80v_state::z80gpu_ctrl_w(u8 data)
 {
-	if (data & 0x02) { // ABORT
+	if (data & 0x02) { // ABORT: accel_top.v forces its FSM to idle -- pass through, stop faking BUSY
+		m_accel->bus_write(0xC9, data);
 		m_accel_busy_until = machine().time();
 		return;
 	}
@@ -648,83 +535,54 @@ void segag80v_state::z80gpu_ctrl_w(u8 data)
 	if (machine().time() < m_accel_busy_until) // ignored while busy, same as LOAD_DATA
 		return;
 
-	z80gpu_run_frame();
-	m_accel_vec_data_idx = 0;
+	m_accel->bus_write(0xC9, data);
 
-	// Estimated real-hardware latency from accel_rotate.v/accel_cull.v's
-	// own FSM cycle counts at clk_cpu (50MHz, 20ns/cycle): ~22 cycles/vertex
-	// (12 for the 6-byte serial vert read, 1 shift, 1 yaw, 1 pitch, 4+3
-	// for the 7-byte scratch write) and ~21 cycles/face (6 for the 3-byte
-	// face-index read, 12 for the 6-byte coordinate read, 2 mul, 1 combine,
-	// amortized face_vis writes). Results are already written to
-	// m_accel_scratch_mem above; only the BUSY/DONE bits a polling Z80
-	// sees are delayed, so a real polling loop experiences a realistic
-	// wait instead of DONE on the very next instruction.
-	const z80gpu_accel::ShapeInfo &shape = (m_accel_shape_select < z80gpu_accel::SHAPE_COUNT)
-		? z80gpu_accel::kShapes[m_accel_shape_select] : z80gpu_accel::kShapes[0];
-	u32 cycles = shape.vertex_count * 22u + shape.face_count * 21u;
-
-	// STAGE3_CLIP's own cost, ROUGH AND UNVALIDATED -- unlike the rotate/
-	// cull terms above (measured against real FSM cycle counts), this is a
-	// back-of-envelope worst-case estimate, not a real measurement: each
-	// (edge, candidate-occluder-face) pair costs up to 4 silhouette
-	// divisions + 1 depth division (fixed_div is ITERS=47 cycles each,
-	// accel_arith.v) plus ~22 cycles of candidate-vertex coordinate reads,
-	// ~257 cycles worst case; candidates-per-edge is approximated here as
-	// the shape's whole face_count (every OTHER part's faces, which for
-	// these 3 shapes' actual part counts is close to all of them minus a
-	// handful owned by the edge's own part). This plausibly threatens the
-	// ~25ms real-hardware frame budget for enterprise in the worst case --
-	// see the project's own "measure real cost before optimizing" plan:
-	// this formula needs replacing with a real measurement (actual
-	// candidate-pair counts from a diagnostic build, or real RTL simulation
-	// cycle counts) before being trusted, not treated as authoritative.
-	cycles += (u32)shape.edge_count * (u32)shape.face_count * 50u;
-
-	m_accel_busy_until = machine().time() + attotime::from_nsec(cycles * 20);
+	// Run the real RTL to completion and use its actual cycle count for the
+	// busy-time estimate, replacing the old hand-derived formula.
+	uint32_t cycles = m_accel->run_to_done();
+	m_accel_busy_until = machine().time() + attotime::from_nsec(cycles * 20); // clk_cpu = 50MHz = 20ns/cycle
 }
 
 u8 segag80v_state::z80gpu_ctrl_r()
 {
-	bool busy = machine().time() < m_accel_busy_until;
-	return (busy ? 0x01 : 0x00) | (busy ? 0x00 : 0x02); // bit0 BUSY, bit1 DONE; bit2 OVERFLOW always 0 (accel_clip.v clamps write_idx at dest_max rather than signaling overflow -- see z80gpu_run_frame's own comment on ACCEL_CLIP_DEST_MAX)
+	if (machine().time() < m_accel_busy_until)
+		return 0x01; // BUSY
+	return m_accel->bus_read(0xC9);
 }
 
-void segag80v_state::z80gpu_shape_select_w(u8 data) { m_accel_shape_select = data; }
-void segag80v_state::z80gpu_yaw_lo_w(u8 data)   { m_accel_yaw   = (m_accel_yaw   & 0xFF00) | data; }
-void segag80v_state::z80gpu_yaw_hi_w(u8 data)   { m_accel_yaw   = (m_accel_yaw   & 0x00FF) | (u16(data) << 8); }
-void segag80v_state::z80gpu_pitch_lo_w(u8 data) { m_accel_pitch = (m_accel_pitch & 0xFF00) | data; }
-void segag80v_state::z80gpu_pitch_hi_w(u8 data) { m_accel_pitch = (m_accel_pitch & 0x00FF) | (u16(data) << 8); }
+void segag80v_state::z80gpu_desc_base_lo_w(u8 data)      { m_accel->bus_write(0xCA, data); }
+void segag80v_state::z80gpu_desc_base_hi_w(u8 data)      { m_accel->bus_write(0xD6, data); }
+void segag80v_state::z80gpu_desc_vertex_count_w(u8 data) { m_accel->bus_write(0xD7, data); }
+void segag80v_state::z80gpu_desc_face_count_w(u8 data)   { m_accel->bus_write(0xD8, data); }
+void segag80v_state::z80gpu_desc_edge_count_w(u8 data)   { m_accel->bus_write(0xD9, data); }
+void segag80v_state::z80gpu_desc_part_count_w(u8 data)   { m_accel->bus_write(0xDA, data); }
+void segag80v_state::z80gpu_desc_coord_shift_w(u8 data)  { m_accel->bus_write(0xDB, data); }
+void segag80v_state::z80gpu_yaw_lo_w(u8 data)   { m_accel->bus_write(0xCB, data); }
+void segag80v_state::z80gpu_yaw_hi_w(u8 data)   { m_accel->bus_write(0xCC, data); }
+void segag80v_state::z80gpu_pitch_lo_w(u8 data) { m_accel->bus_write(0xCD, data); }
+void segag80v_state::z80gpu_pitch_hi_w(u8 data) { m_accel->bus_write(0xCE, data); }
+void segag80v_state::z80gpu_distance_lo_w(u8 data) { m_accel->bus_write(0xDC, data); }
+void segag80v_state::z80gpu_distance_hi_w(u8 data) { m_accel->bus_write(0xDD, data); }
 
-u8 segag80v_state::z80gpu_vec_count_lo_r() { return (u8)m_accel_vec_count; }
-u8 segag80v_state::z80gpu_vec_count_hi_r() { return (u8)(m_accel_vec_count >> 8); }
+u8 segag80v_state::z80gpu_vec_count_lo_r() { return m_accel->bus_read(0xCF); }
+u8 segag80v_state::z80gpu_vec_count_hi_r() { return m_accel->bus_read(0xD0); }
 
-// Burst-read from the vector_t chain z80gpu_run_frame's STAGE3_VECBUILD
-// wrote into m_accel_scratch_mem at ACCEL_SCR_VECBUF_BASE -- auto-
-// increments per read, matching accel_top.v's VEC_DATA port exactly. A Z80
-// driver reads VEC_COUNT first and bursts exactly count*4 bytes, so there's
-// no bounds check here (same trust accel_top.v itself places in the Z80
-// side behaving that way).
-u8 segag80v_state::z80gpu_vec_data_r()
-{
-	u8 data = m_accel_scratch_mem[ACCEL_SCR_VECBUF_BASE + m_accel_vec_data_idx];
-	m_accel_vec_data_idx++;
-	return data;
-}
+// Burst-read from accel_top.v's own VEC_DATA port -- the real RTL owns the
+// auto-incrementing read pointer, so there's nothing left to track here.
+u8 segag80v_state::z80gpu_vec_data_r() { return m_accel->bus_read(0xD1); }
 
-void segag80v_state::z80gpu_load_addr_lo_w(u8 data) { m_accel_load_addr = (m_accel_load_addr & 0xFF00) | data; }
-void segag80v_state::z80gpu_load_addr_hi_w(u8 data) { m_accel_load_addr = (m_accel_load_addr & 0x00FF) | (u16(data) << 8); }
+void segag80v_state::z80gpu_load_addr_lo_w(u8 data) { m_accel->bus_write(0xD2, data); }
+void segag80v_state::z80gpu_load_addr_hi_w(u8 data) { m_accel->bus_write(0xD3, data); }
 
 void segag80v_state::z80gpu_load_data_w(u8 data)
 {
 	if (machine().time() < m_accel_busy_until) // hardware interlock, per accel_top.v's port map
 		return;
-	m_accel_shape_mem[m_accel_load_addr & 0x0FFF] = data;
-	m_accel_load_addr++;
+	m_accel->bus_write(0xD4, data);
 }
 
-void segag80v_state::z80gpu_clip_enable_w(u8 data) { m_accel_clip_enable = data & 1; }
-u8   segag80v_state::z80gpu_clip_enable_r()         { return m_accel_clip_enable; }
+void segag80v_state::z80gpu_clip_enable_w(u8 data) { m_accel->bus_write(0xD5, data); }
+u8   segag80v_state::z80gpu_clip_enable_r()         { return m_accel->bus_read(0xD5); }
 
 
 /*************************************
@@ -846,39 +704,24 @@ void segag80v_state::main_portmap(address_map &map)
 	map(0xbe, 0xbe).r(FUNC(segag80v_state::multiply_r));
 	map(0xbf, 0xbf).w(FUNC(segag80v_state::unknown_w));
 
-	map(0xc0, 0xc0).w(FUNC(segag80v_state::rect_to_polar_w));
-	map(0xc0, 0xc0).r(FUNC(segag80v_state::rect_to_polar_r));
-	map(0xc1, 0xc1).w(FUNC(segag80v_state::cordic_rotate_w));
-	map(0xc1, 0xc1).r(FUNC(segag80v_state::cordic_rotate_r));
-	map(0xc2, 0xc2).w(FUNC(segag80v_state::cordic_cross_sign_w));
-	map(0xc2, 0xc2).r(FUNC(segag80v_state::cordic_cross_sign_r));
-	map(0xc3, 0xc3).w(FUNC(segag80v_state::cordic_triple_sign_w));
-	map(0xc3, 0xc3).r(FUNC(segag80v_state::cordic_triple_sign_r));
-	map(0xc4, 0xc4).w(FUNC(segag80v_state::cordic_point_in_tri_w));
-	map(0xc4, 0xc4).r(FUNC(segag80v_state::cordic_point_in_tri_r));
-	map(0xc5, 0xc5).w(FUNC(segag80v_state::cordic_project_point_w)); // write-only, see its own comment (RUN half)
-	map(0xc6, 0xc6).w(FUNC(segag80v_state::cordic_hidden_line_w)); // write-only, see its own comment (RUN half)
-	map(0xc7, 0xc7).w(FUNC(segag80v_state::cordic_project_point_load_w)); // write-only, LOAD half, see its own comment
-	map(0xc8, 0xc8).w(FUNC(segag80v_state::cordic_hidden_line_load_w)); // write-only, LOAD half, see its own comment
+	// ports 0xC0-0xC8 (the idealized CORDIC coprocessor, segag80v_cordic.h)
+	// are disabled rather than deleted; restore via git history if needed.
 
-	// z80gpu 3D accelerator port map (0xC9-0xD5) -- accel_top.v's actual
-	// protocol, byte-oriented against an internal shape_mem the Z80 loads
-	// explicitly via LOAD_ADDR/LOAD_DATA (no bus mastering, matching the
-	// project's "minimize bus access" design goal). Deliberately placed at
-	// a disjoint range from 0xC0-0xC8 above (that's a DMA-pointer/struct
-	// protocol where the coprocessor walks Z80 memory directly -- a
-	// structurally different, older idealized model) so both protocols
-	// live in this one portmap: whichever a given ROM's own #if doesn't
-	// use is simply never written/read. No separate driver variant needed
-	// just to reach these ports -- any existing config (zektor/startrek,
-	// or their _fpga bus-timing variants) already routes here.
+	// z80gpu 3D accelerator port map (0xC9-0xDD), accel_top.v's actual
+	// protocol against an internal shape_mem the Z80 loads via LOAD_ADDR/
+	// LOAD_DATA. 0xCA/0xD6+0xD7-0xDB are a shape descriptor (base +
+	// vertex/face/edge/part counts + coord_shift); 0xDC/0xDD (DISTANCE) is
+	// per-frame like yaw/pitch since a shape's size is fixed but its
+	// distance isn't.
 	map(0xc9, 0xc9).w(FUNC(segag80v_state::z80gpu_ctrl_w));
 	map(0xc9, 0xc9).r(FUNC(segag80v_state::z80gpu_ctrl_r));
-	map(0xca, 0xca).w(FUNC(segag80v_state::z80gpu_shape_select_w));
+	map(0xca, 0xca).w(FUNC(segag80v_state::z80gpu_desc_base_lo_w));
 	map(0xcb, 0xcb).w(FUNC(segag80v_state::z80gpu_yaw_lo_w));
 	map(0xcc, 0xcc).w(FUNC(segag80v_state::z80gpu_yaw_hi_w));
 	map(0xcd, 0xcd).w(FUNC(segag80v_state::z80gpu_pitch_lo_w));
 	map(0xce, 0xce).w(FUNC(segag80v_state::z80gpu_pitch_hi_w));
+	map(0xdc, 0xdc).w(FUNC(segag80v_state::z80gpu_distance_lo_w));
+	map(0xdd, 0xdd).w(FUNC(segag80v_state::z80gpu_distance_hi_w));
 	map(0xcf, 0xcf).r(FUNC(segag80v_state::z80gpu_vec_count_lo_r));
 	map(0xd0, 0xd0).r(FUNC(segag80v_state::z80gpu_vec_count_hi_r));
 	map(0xd1, 0xd1).r(FUNC(segag80v_state::z80gpu_vec_data_r));
@@ -887,6 +730,12 @@ void segag80v_state::main_portmap(address_map &map)
 	map(0xd4, 0xd4).w(FUNC(segag80v_state::z80gpu_load_data_w));
 	map(0xd5, 0xd5).w(FUNC(segag80v_state::z80gpu_clip_enable_w));
 	map(0xd5, 0xd5).r(FUNC(segag80v_state::z80gpu_clip_enable_r));
+	map(0xd6, 0xd6).w(FUNC(segag80v_state::z80gpu_desc_base_hi_w));
+	map(0xd7, 0xd7).w(FUNC(segag80v_state::z80gpu_desc_vertex_count_w));
+	map(0xd8, 0xd8).w(FUNC(segag80v_state::z80gpu_desc_face_count_w));
+	map(0xd9, 0xd9).w(FUNC(segag80v_state::z80gpu_desc_edge_count_w));
+	map(0xda, 0xda).w(FUNC(segag80v_state::z80gpu_desc_part_count_w));
+	map(0xdb, 0xdb).w(FUNC(segag80v_state::z80gpu_desc_coord_shift_w));
 
 	map(0xf9, 0xf9).mirror(0x04).w(FUNC(segag80v_state::coin_count_w));
 	map(0xf8, 0xfb).r(FUNC(segag80v_state::mangled_ports_r));

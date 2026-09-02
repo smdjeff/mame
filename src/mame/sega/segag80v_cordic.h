@@ -1,20 +1,10 @@
 // license:BSD-3-Clause
 // copyright-holders:Aaron Giles
 //
-// The original idealized CORDIC coprocessor (ports 0xC0-0xC8) --
-// full-double-precision, zero-emulated-T-state math handlers backing
-// sega-vector/3d's ENABLE_CORDIC path (game.c), structurally distinct from
-// the real z80gpu 3D accelerator (segag80v_z80gpu_accel.h, ports
-// 0xC9-0xD4) that models actual fixed-point hardware timing. Split out of
-// segag80v.cpp for the same reason the z80gpu model was: it's a large,
-// self-contained register file that doesn't need to sit inline in the
-// main driver file to be understood. Unlike segag80v_z80gpu_accel.h's
-// namespaced free functions (shared with a vendored copy outside MAME's
-// build), these are segag80v_state:: member function definitions -- kept
-// `inline` here since this header is included directly by segag80v.cpp
-// rather than pulled in transitively via segag80v.h (nothing else in this
-// driver needs to call into the idealized coprocessor), but marked that
-// way defensively in case that ever changes.
+// DISABLED, NOT COMPILED: not #include'd from segag80v.cpp; its ports,
+// handler declarations, and member state were removed from
+// main_portmap()/segag80v.h. Kept on disk as reference; restore via git
+// history if needed again.
 //
 // See each handler's own comment below for its specific wire protocol,
 // load/run split, and hidden-line algorithm (Roberts' 1963).

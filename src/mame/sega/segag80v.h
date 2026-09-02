@@ -11,7 +11,7 @@
 #pragma once
 
 #include "segag80.h"
-#include "segag80v_z80gpu_accel.h"
+#include "z80gpu_verilated/z80gpu_verilated.h"
 #include "segaspeech.h"
 #include "segausb.h"
 
@@ -55,59 +55,6 @@ public:
 		m_mult_data{0,0},
 		m_mult_result(0),
 		m_vector_pc(0),
-		m_polar_windex(0),
-		m_polar_data{0,0,0,0},
-		m_polar_vector(0),
-		m_rotate_windex(0),
-		m_rotate_data{0,0,0,0},
-		m_rotate_vector(0),
-		m_cross_windex(0),
-		m_cross_data{0,0,0,0,0,0},
-		m_cross_result(0),
-		m_triple_windex(0),
-		m_triple_data{0,0,0,0,0,0,0,0,0,0,0,0},
-		m_triple_result(0),
-		m_pit_windex(0),
-		m_pit_data{0,0,0,0,0,0,0,0},
-		m_pit_result(0),
-		m_proj_load_windex(0),
-		m_proj_load_data{0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-		m_proj_verts_ptr(0),
-		m_proj_count(0),
-		m_proj_shift(0),
-		m_proj_px_ptr(0),
-		m_proj_py_ptr(0),
-		m_proj_px8_ptr(0),
-		m_proj_py8_ptr(0),
-		m_proj_pz8_ptr(0),
-		m_proj_windex(0),
-		m_proj_data{0,0,0,0},
-		m_hl_load_windex(0),
-		m_hl_load_data{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-		m_hl_px8_ptr(0),
-		m_hl_py8_ptr(0),
-		m_hl_pz8_ptr(0),
-		m_hl_px_ptr(0),
-		m_hl_py_ptr(0),
-		m_hl_faces_ptr(0),
-		m_hl_face_colors_ptr(0),
-		m_hl_edges_ptr(0),
-		m_hl_edge_count(0),
-		m_hl_edge_colors_ptr(0),
-		m_hl_part_face_end_ptr(0),
-		m_hl_part_count(0),
-		m_hl_dest_max(0),
-		m_hl_count_ptr(0),
-		m_hl_windex(0),
-		m_hl_data{0,0,0,0},
-		m_accel_ctrl(0),
-		m_accel_shape_select(0),
-		m_accel_yaw(0),
-		m_accel_pitch(0),
-		m_accel_vec_count(0),
-		m_accel_vec_data_idx(0),
-		m_accel_load_addr(0),
-		m_accel_clip_enable(1),
 		m_accel_busy_until(attotime::zero),
 		m_spinner_select(0),
 		m_spinner_sign(0),
@@ -148,6 +95,10 @@ public:
 		m_vg_symbol_count(0),
 		m_vg_vector_count(0)
 	{ }
+
+	// Out-of-line (defined in segag80v.cpp) so m_accel's unique_ptr
+	// destructor doesn't need z80gpu_verilated_accel's complete type here.
+	~segag80v_state();
 
 	void g80v_base(machine_config &config);
 	void tacscan(machine_config &config);
@@ -226,91 +177,18 @@ private:
 	u16 m_mult_result;
 	u16 m_vector_pc;
 
-// xy_rect_to_polar( int16_t dx, int16_t dy, uint8_t* size, uint16_t* angle )
-	u8 m_polar_windex;
-	u8 m_polar_data[4];
-	u32 m_polar_vector;
+	// The idealized CORDIC coprocessor's state is disabled rather than
+	// deleted, along with its handlers and port map entries -- see
+	// segag80v.cpp's main_portmap() comment. Not stock Sega hardware
+	// (verified against pristine upstream MAME).
 
-	u8 m_rotate_windex;
-	u8 m_rotate_data[4];
-	u16 m_rotate_vector;
-
-	u8 m_cross_windex;
-	u8 m_cross_data[6];
-	u8 m_cross_result;
-
-	u8 m_triple_windex;
-	u8 m_triple_data[12];
-	u8 m_triple_result;
-
-	u8 m_pit_windex;
-	u8 m_pit_data[8];
-	u8 m_pit_result;
-
-	// CORDIC_PROJECT_POINT split into a LOAD burst (fired once per shape
-	// switch, m_proj_load_*, persisted as plain members between calls) and a
-	// RUN burst (fired every frame, m_proj_windex/m_proj_data, just
-	// yaw/pitch) -- see cordic_project_args_t's comment, sega-vector/3d's
-	// game.c, for why. cordic_project_point_load_w latches the LOAD fields
-	// below; cordic_project_point_w (the RUN handler) reads them back
-	// alongside the freshly-received yaw/pitch.
-	u8  m_proj_load_windex;
-	u8  m_proj_load_data[14];
-	u16 m_proj_verts_ptr;
-	u8  m_proj_count;
-	u8  m_proj_shift;
-	u16 m_proj_px_ptr, m_proj_py_ptr, m_proj_px8_ptr, m_proj_py8_ptr, m_proj_pz8_ptr;
-	u8 m_proj_windex;
-	u8 m_proj_data[4];
-
-	// same LOAD/RUN split as CORDIC_PROJECT_POINT above, see
-	// cordic_hidden_line_args_t's comment (game.c) -- only face_vis_ptr/
-	// dest_ptr are sent every call, everything else is loaded once per shape.
-	u8  m_hl_load_windex;
-	u8  m_hl_load_data[26];
-	u16 m_hl_px8_ptr, m_hl_py8_ptr, m_hl_pz8_ptr;
-	u16 m_hl_px_ptr, m_hl_py_ptr;
-	u16 m_hl_faces_ptr;
-	u16 m_hl_face_colors_ptr;
-	u16 m_hl_edges_ptr;
-	u8  m_hl_edge_count;
-	u16 m_hl_edge_colors_ptr;
-	u16 m_hl_part_face_end_ptr;
-	u8  m_hl_part_count;
-	u16 m_hl_dest_max;
-	u16 m_hl_count_ptr;
-	u8 m_hl_windex;
-	u8 m_hl_data[4];
-
-	// z80gpu 3D accelerator model (segag80v_z80gpu_accel.h) -- bit-exact
-	// port of the real RTL's fixed-point algorithm (accel_rotate.v/
-	// accel_cull.v/accel_clip.v), NOT the idealized CORDIC members above.
-	// main_portmap() maps ports 0xC9-0xD5 to the handlers below, in every
-	// machine config (no separate variant needed -- see main_portmap()'s
-	// own comment).
-	//
-	// STAGE1_ROTATE+STAGE2_CULL+STAGE3_CLIP (accel_clip.v, exact per-part
-	// hidden-line removal) all run in z80gpu_run_frame(). Real hardware
-	// has no port exposing
-	// m_accel_scratch_mem's intermediate contents (px8/py8/pz8/face_vis)
-	// directly -- by design, matching accel_top.v's protocol, which only
-	// ever hands back a finished vector_t chain -- so this model doesn't
-	// add one either; validating STAGE1/STAGE2/STAGE3 in isolation is what
-	// z80gpu's sim/model/check_against_rtl_refs.cpp is for.
-	u8  m_accel_shape_mem[4096];   // mirrors accel_shape_mem.v's byte layout (see kShapes)
-	u8  m_accel_scratch_mem[4096]; // mirrors accel_scratch_mem.v's byte layout (grown from 2048 -- see that module's own header for why)
-	u8  m_accel_ctrl;              // read: bit0 BUSY, bit1 DONE, bit2 OVERFLOW; write: bit0 START, bit1 ABORT
-	u8  m_accel_shape_select;
-	u16 m_accel_yaw, m_accel_pitch;
-	u16 m_accel_vec_count;
-	u16 m_accel_vec_data_idx;      // VEC_DATA burst-read auto-increment pointer
-	u16 m_accel_load_addr;         // LOAD_ADDR flat write pointer into m_accel_shape_mem
-	u8  m_accel_clip_enable;       // 0xD5 CLIP_ENABLE bit0, persistent -- sega-vector/3d's ENABLE_EDGE_OCCLUSION equivalent: 1 (default) = exact per-part occlusion, 0 = backface-cull-only. No ENABLE_FACE_CULL equivalent (accel_top.v's own port-map comment): STAGE2_CULL always runs.
-	// "busy until" machine-time threshold, set on START from an estimated
-	// STAGE1/STAGE2 cycle count (derived from accel_rotate.v/accel_cull.v's
-	// own per-vertex/per-face FSM cycle counts at clk_cpu's 50MHz/20ns) so
-	// a Z80 polling loop sees a realistic delay instead of DONE on the very
-	// next instruction -- see z80gpu_ctrl_w's own comment for the estimate.
+	// z80gpu 3D accelerator: the real RTL (accel_top.v and everything it
+	// instantiates), run via Verilator and driven through its own real Z80
+	// bus pins -- no separate C++ mirror of shape_mem/registers/etc, all
+	// state lives in the Verilated model like a real chip.
+	std::unique_ptr<z80gpu_verilated_accel> m_accel;
+	// Set on START from the real clk_cpu cycle count run_to_done() consumed,
+	// so a Z80 polling loop sees a hardware-accurate delay before DONE.
 	attotime m_accel_busy_until;
 
 	u8 m_spinner_select;
@@ -416,35 +294,26 @@ private:
 	u8 vector_pc_lsb_r();
 	u8 vector_pc_msb_r();
 
-	void rect_to_polar_w(u8 data);
-	u8 rect_to_polar_r();
+	// The idealized CORDIC coprocessor's handler declarations (ports
+	// 0xC0-0xC8) are disabled along with the port map -- see
+	// main_portmap()'s comment.
 
-	void cordic_rotate_w(u8 data);
-	u8 cordic_rotate_r();
-
-	void cordic_cross_sign_w(u8 data);
-	u8 cordic_cross_sign_r();
-
-	void cordic_triple_sign_w(u8 data);
-	u8 cordic_triple_sign_r();
-
-	void cordic_point_in_tri_w(u8 data);
-	u8 cordic_point_in_tri_r();
-
-	void cordic_project_point_load_w(u8 data);
-	void cordic_project_point_w(u8 data);
-
-	void cordic_hidden_line_load_w(u8 data);
-	void cordic_hidden_line_w(u8 data);
-
-	// z80gpu 3D accelerator model -- see m_accel_* members' own comment.
+	// z80gpu 3D accelerator -- see m_accel's own comment.
 	void z80gpu_ctrl_w(u8 data);
 	u8   z80gpu_ctrl_r();
-	void z80gpu_shape_select_w(u8 data);
+	void z80gpu_desc_base_lo_w(u8 data);
+	void z80gpu_desc_base_hi_w(u8 data);
+	void z80gpu_desc_vertex_count_w(u8 data);
+	void z80gpu_desc_face_count_w(u8 data);
+	void z80gpu_desc_edge_count_w(u8 data);
+	void z80gpu_desc_part_count_w(u8 data);
+	void z80gpu_desc_coord_shift_w(u8 data);
 	void z80gpu_yaw_lo_w(u8 data);
 	void z80gpu_yaw_hi_w(u8 data);
 	void z80gpu_pitch_lo_w(u8 data);
 	void z80gpu_pitch_hi_w(u8 data);
+	void z80gpu_distance_lo_w(u8 data);
+	void z80gpu_distance_hi_w(u8 data);
 	u8   z80gpu_vec_count_lo_r();
 	u8   z80gpu_vec_count_hi_r();
 	u8   z80gpu_vec_data_r();
@@ -453,7 +322,6 @@ private:
 	void z80gpu_load_data_w(u8 data);
 	void z80gpu_clip_enable_w(u8 data);
 	u8   z80gpu_clip_enable_r();
-	void z80gpu_run_frame();
 
 	void coin_count_w(u8 data);
 	void unknown_w(u8 data);
